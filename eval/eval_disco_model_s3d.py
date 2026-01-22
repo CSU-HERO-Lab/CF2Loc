@@ -26,8 +26,8 @@ parser.add_argument("--ckpt_path", type=str, default="./eval/logs")
 parser.add_argument("--visualize", action="store_true")
 
 # New Args for CrossModal
-parser.add_argument("--rrp_model_ckpt", type=str, default='logs/rrp_runs/rrp_model_20260113_124701/checkpoints/epoch=03-val_action_loss=0.86.ckpt', help="Path to RRP checkpoint")
-parser.add_argument("--disco_model_ckpt", type=str, default='logs/disco_runs/disco_model_20260113_005235/checkpoints/epoch=09-val_acc=0.75_20260113_005239.ckpt', help="Path to DisCo checkpoint")
+parser.add_argument("--rrp_model_ckpt", type=str, default='checkpoints\RRP_s3d_best.ckpt', help="Path to RRP checkpoint")
+parser.add_argument("--disco_model_ckpt", type=str, default='checkpoints\DisCo_s3d_best.ckpt', help="Path to DisCo checkpoint")
 parser.add_argument("--top_k", type=int, default=100, help="Number of candidates to re-rank")
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
