@@ -40,7 +40,6 @@ We provide a **Metadata Pack** containing processed labels, poses, and DESDF fea
 
 **Step 2: Download Raw Data**
 *   Go to the [**Structured3D Official Website**](https://structured3d-dataset.org/) or [**GitHub**](https://github.com/bertjiazheng/Structured3D) to request access and download the **Full** dataset.
-*   You specifically need the **RGB images** and **Perspective maps** (if not included in our metadata).
 
 **Step 3: Merge Data**
 *   Place the downloaded RGB images into the corresponding `imgs/` folders in our directory structure.
