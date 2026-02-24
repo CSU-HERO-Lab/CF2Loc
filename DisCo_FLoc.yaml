@@ -18,6 +18,7 @@ use_cls_token: true
 datasets:
   data_folder: "datasets_s3d/Structured3D"
   data_splits: "datasets_s3d/Structured3D/split.yaml"
+  val_split: "val"
   floorplan_img_size: [256, 256]
   local_map_crop_size_meters: 5.0  # Crop size for local map augmentation
   # Pose Augmentation (Training Only)

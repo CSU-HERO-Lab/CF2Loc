@@ -34,7 +34,20 @@ def main(config):
         dataset_cfg = dataset_cfg,
     )
     
-    val_split = "test"
+    val_split = dataset_cfg.get("val_split", "val")
+    with open(dataset_cfg["data_splits"], "r", encoding="utf-8") as f:
+        available_splits = yaml.safe_load(f) or {}
+    if val_split not in available_splits:
+        if "test" in available_splits:
+            print(f"[WARN] Requested val split '{val_split}' not found; fallback to 'test'.")
+            val_split = "test"
+        else:
+            raise ValueError(
+                f"Validation split '{val_split}' not found in {dataset_cfg['data_splits']}. "
+                f"Available splits: {list(available_splits.keys())}"
+            )
+    print(f"Using validation split: {val_split}")
+
     val_dataset = DisCo_Dataset(
         data_folder=dataset_cfg['data_folder'],
         data_splits_path=dataset_cfg['data_splits'],

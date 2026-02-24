@@ -48,6 +48,7 @@ image_size: [256, 256]  #[96, 96] # width, height
 datasets:
   data_folder: datasets_s3d/Structured3D
   data_splits: datasets_s3d/Structured3D/split.yaml
+  val_split: val
   rgb_img_size: [640, 480]
   floorplan_img_size: [256, 256]
   rmd_ray_num: 8
