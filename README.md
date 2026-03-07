@@ -88,3 +88,10 @@ python training/train_rrp_model.py --config RRP.yaml
 ```bash
 python eval/eval_disco_model_s3d.py
 ```
+
+## Gibson Version
+If you want to train on Gibson datasets, you can
+    ```bash
+    git checkout main_gibson
+    ```
+to switch to Gibson version.
