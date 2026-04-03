@@ -1,4 +1,4 @@
-# DisCo-FLoc: Using Dual-Level Visual-Geometric Contrasts to Disambiguate Depth-Aware Visual Floorplan Localization: Using Dual-Level Visual-Geometric Contrasts to Disambiguate Depth-Aware Visual Floorplan Localization
+# DisCo-FLoc: Using Dual-Level Visual-Geometric Contrasts to Disambiguate Depth-Aware Visual Floorplan Localization
 
 <p align="center">
     <a href="https://arxiv.org/abs/2601.01822"><img src="https://img.shields.io/badge/arXiv-2601.01822-b31b1b.svg"></a>
