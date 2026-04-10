@@ -26,8 +26,8 @@ parser.add_argument("--ckpt_path", type=str, default="./eval/logs")
 parser.add_argument("--visualize", action="store_true")
 
 # New Args for CrossModal
-parser.add_argument("--rrp_model_ckpt", type=str, default='checkpoints\RRP_s3d_best.ckpt', help="Path to RRP checkpoint")
-parser.add_argument("--disco_model_ckpt", type=str, default='checkpoints\DisCo_s3d_best.ckpt', help="Path to DisCo checkpoint")
+parser.add_argument("--rrp_model_ckpt", type=str, default="checkpoints/RRP_s3d_best.ckpt", help="Path to RRP checkpoint")
+parser.add_argument("--disco_model_ckpt", type=str, default="checkpoints/DisCo_s3d_best.ckpt", help="Path to DisCo checkpoint")
 parser.add_argument("--top_k", type=int, default=100, help="Number of candidates to re-rank")
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
@@ -148,6 +148,7 @@ def evaluate():
     # --- Evaluation Loop ---
     acc_record = []
     acc_orn_record = []
+    recall_1m_hits = 0
     
     # Stats for semantic improvement
     improved_count = 0
@@ -189,7 +190,8 @@ def evaluate():
     else:
         loop_range = range(len(test_set))
 
-    for data_idx in tqdm.tqdm(loop_range):
+    eval_pbar = tqdm.tqdm(loop_range, desc="Evaluating")
+    for data_idx in eval_pbar:
         # Get data
         data = test_set[data_idx]
         
@@ -247,8 +249,7 @@ def evaluate():
         
         # Get image embedding (only once)
         with torch.no_grad():
-            img_emb, _ = cl_model(obs_img_tensor, torch.zeros(1, 1, 128, 128).to(device)) # Dummy map
-            # We only need img_emb
+            img_tokens = cl_model.encode_image(obs_img_tensor)
         
         # Flatten prob_dist to find Top-K candidates
         flat_probs = prob_dist.flatten()
@@ -289,7 +290,7 @@ def evaluate():
             
             with torch.no_grad():
                 # Use model's internal attention logic to score candidates
-                sim_scores = cl_model.score_candidates(img_emb, local_maps_batch)
+                sim_scores = cl_model.score_candidates(img_tokens, local_maps_batch)
                 
                 # Fusion
                 geo_probs = topk_vals.to(device)
@@ -322,10 +323,15 @@ def evaluate():
         # --- Accuracy ---
         acc = np.linalg.norm(pose_pred[:2] - gt_pose_desdf[:2], 2.0) * 0.1
         acc_record.append(acc)
-        
+        if acc < 1.0:
+            recall_1m_hits += 1
+         
         acc_orn = (pose_pred[2] - gt_pose_desdf[2]) % (2 * np.pi)
         acc_orn = min(acc_orn, 2 * np.pi - acc_orn) / np.pi * 180
         acc_orn_record.append(acc_orn)
+
+        current_1m_recall = recall_1m_hits / len(acc_record)
+        eval_pbar.set_postfix({"1m_recall": f"{current_1m_recall:.4f}"})
         
         # Compare (Critical changes crossing 1m threshold)
         is_improved = (geo_error > 1.0 and acc < 1.0)

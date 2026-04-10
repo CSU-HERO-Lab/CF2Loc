@@ -124,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="DisCo_FLoc.yaml", type=str)
     # Allow overriding batch size from CLI
     parser.add_argument("--batch_size", default=64, type=int)
+    parser.add_argument("--epochs", default=None, type=int)
     parser.add_argument("--run_name", default=None, type=str, help="Experiment name. If not provided, adds timestamp to default.")
     args = parser.parse_args()
     
@@ -138,7 +139,8 @@ if __name__ == "__main__":
         config['run_name'] = f"disco_model_{timestamp}"
 
     config['batch_size'] = args.batch_size
-    config['epochs'] = 20
+    if args.epochs is not None:
+        config['epochs'] = args.epochs
     
     # Ensure dptv2 path is correct
     if 'dptv2_ckpt_path' not in config:

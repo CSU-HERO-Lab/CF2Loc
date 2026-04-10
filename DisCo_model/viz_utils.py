@@ -1,8 +1,7 @@
-import torch
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 import wandb
 
 def visualize_cross_modal_batch(
@@ -26,6 +25,8 @@ def visualize_cross_modal_batch(
     Helper to visualize a single cross-modal sample.
     Uses standard image coordinate system (origin='upper').
     """
+    import cv2
+
     device = obs_img.device
     
     # 1. RGB Image (Denormalize)

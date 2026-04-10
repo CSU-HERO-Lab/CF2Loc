@@ -3,7 +3,7 @@ project_name: "disco_model"
 run_name: "disco_model"
 use_wandb: true
 gpu_ids: [0]
-epochs: 20
+epochs: 30
 batch_size: 64
 num_workers: 4
 image_log_freq: 1000  # Visualization frequency (steps)
@@ -12,8 +12,15 @@ decoder_type: "rrp"
 
 # Model Configuration
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
-
-use_cls_token: true
+image_encoder: "vits"
+freeze_image_backbone: true
+feature_dim: 128
+num_heads: 4
+image_token_grid: [6, 40]
+image_self_attn_layers: 1
+lr: 1.0e-4
+lr_scheduler: "cosine"
+min_lr: 1.0e-5
 # Dataset Configuration
 datasets:
   data_folder: "datasets_s3d/Structured3D"
