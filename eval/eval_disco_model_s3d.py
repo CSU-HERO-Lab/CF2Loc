@@ -32,6 +32,18 @@ parser.add_argument("--top_k", type=int, default=100, help="Number of candidates
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
 parser.add_argument("--all_imgs", default=True, help="If True, evaluate all images as reference frames in a sliding window manner (dense evaluation). Default to False (sparse evaluation).")
+parser.add_argument(
+    "--cluster_source_top_k",
+    type=int,
+    default=0,
+    help="If > 0, take the top-N RRP candidates, apply radius-based spatial clustering, and only re-rank the cluster representatives.",
+)
+parser.add_argument(
+    "--cluster_radius_m",
+    type=float,
+    default=0.0,
+    help="Radius in meters for spatial clustering / NMS over RRP candidates.",
+)
 
 # Single Image Debugging
 parser.add_argument("--scene_name", type=str, default=None, help="Debug: Specific scene name")
@@ -82,6 +94,44 @@ def crop_local_map(map_img, x, y, theta, crop_size_meters, res=0.02, output_size
         local_map = cv2.resize(local_map, (output_size, output_size), interpolation=cv2.INTER_AREA)
         
     return local_map
+
+
+def cluster_topk_candidates(topk_vals, topk_indices, width, radius_m, meters_per_cell):
+    if topk_indices.numel() == 0 or radius_m <= 0:
+        keep_positions = torch.arange(topk_indices.shape[0], dtype=torch.long)
+        cluster_sizes = torch.ones(topk_indices.shape[0], dtype=torch.long)
+        return topk_vals, topk_indices, keep_positions, cluster_sizes
+
+    radius_cells = radius_m / meters_per_cell
+    radius_sq = radius_cells * radius_cells
+
+    topk_y = (topk_indices // width).to(torch.float32)
+    topk_x = (topk_indices % width).to(torch.float32)
+
+    suppressed = torch.zeros(topk_indices.shape[0], dtype=torch.bool)
+    keep_positions = []
+    cluster_sizes = []
+
+    for idx in range(topk_indices.shape[0]):
+        if suppressed[idx]:
+            continue
+
+        dx = topk_x - topk_x[idx]
+        dy = topk_y - topk_y[idx]
+        cluster_mask = (~suppressed) & ((dx * dx + dy * dy) <= radius_sq)
+
+        keep_positions.append(idx)
+        cluster_sizes.append(int(cluster_mask.sum().item()))
+        suppressed |= cluster_mask
+
+    keep_positions = torch.tensor(keep_positions, dtype=torch.long)
+    cluster_sizes = torch.tensor(cluster_sizes, dtype=torch.long)
+    return (
+        topk_vals[keep_positions],
+        topk_indices[keep_positions],
+        keep_positions,
+        cluster_sizes,
+    )
 
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -153,6 +203,10 @@ def evaluate():
     # Stats for semantic improvement
     improved_count = 0
     worsened_count = 0
+    meters_per_desdf_cell = desdf_stride * map_res
+    use_clustered_rerank = args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
+    clustered_pool_sizes = []
+    clustered_rep_sizes = []
 
     # Create visualization directories
     if args.visualize:
@@ -164,7 +218,13 @@ def evaluate():
              os.makedirs(os.path.join(viz_dir, "debug"), exist_ok=True)
         print(f"Saving visualizations to {viz_dir}")
 
-    print("Starting Evaluation...")
+    if use_clustered_rerank:
+        print(
+            "Starting Evaluation with clustered rerank "
+            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m)..."
+        )
+    else:
+        print("Starting Evaluation...")
     
     # Determine Loop Range
     if args.scene_name is not None and args.img_id is not None:
@@ -253,10 +313,27 @@ def evaluate():
         
         # Flatten prob_dist to find Top-K candidates
         flat_probs = prob_dist.flatten()
-        topk_vals, topk_indices = torch.topk(flat_probs, k=min(args.top_k, flat_probs.numel()))
+        initial_candidate_k = (
+            args.cluster_source_top_k if use_clustered_rerank else args.top_k
+        )
+        topk_vals, topk_indices = torch.topk(
+            flat_probs, k=min(initial_candidate_k, flat_probs.numel())
+        )
         
         # Convert indices back to (y, x) in desdf frame
         H_d, W_d = prob_dist.shape
+        cluster_sizes = None
+        if use_clustered_rerank:
+            clustered_pool_sizes.append(len(topk_indices))
+            topk_vals, topk_indices, _, cluster_sizes = cluster_topk_candidates(
+                topk_vals,
+                topk_indices,
+                width=W_d,
+                radius_m=args.cluster_radius_m,
+                meters_per_cell=meters_per_desdf_cell,
+            )
+            clustered_rep_sizes.append(len(topk_indices))
+
         topk_y = topk_indices // W_d
         topk_x = topk_indices % W_d
         
@@ -331,7 +408,10 @@ def evaluate():
         acc_orn_record.append(acc_orn)
 
         current_1m_recall = recall_1m_hits / len(acc_record)
-        eval_pbar.set_postfix({"1m_recall": f"{current_1m_recall:.4f}"})
+        postfix = {"1m_recall": f"{current_1m_recall:.4f}"}
+        if use_clustered_rerank and clustered_rep_sizes:
+            postfix["avg_rep_k"] = f"{(sum(clustered_rep_sizes) / len(clustered_rep_sizes)):.1f}"
+        eval_pbar.set_postfix(postfix)
         
         # Compare (Critical changes crossing 1m threshold)
         is_improved = (geo_error > 1.0 and acc < 1.0)
@@ -461,7 +541,19 @@ def evaluate():
     total_samples = len(acc_record)
     
     print("\n" + "="*30)
-    print(f"Results with DisCo (k={args.top_k}, alpha={args.alpha})")
+    if use_clustered_rerank:
+        avg_pool_k = np.mean(clustered_pool_sizes) if clustered_pool_sizes else 0.0
+        avg_rep_k = np.mean(clustered_rep_sizes) if clustered_rep_sizes else 0.0
+        avg_cluster_size = (
+            avg_pool_k / max(avg_rep_k, 1e-6) if clustered_rep_sizes else 0.0
+        )
+        print(
+            "Results with DisCo clustered rerank "
+            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m, "
+            f"avg_rep_k={avg_rep_k:.1f}, avg_cluster_size={avg_cluster_size:.2f}, alpha={args.alpha})"
+        )
+    else:
+        print(f"Results with DisCo (k={args.top_k}, alpha={args.alpha})")
     print(f"1m recall = {np.sum(acc_record < 1) / total_samples:.4f}")
     print(f"0.5m recall = {np.sum(acc_record < 0.5) / total_samples:.4f}")
     print(f"0.1m recall = {np.sum(acc_record < 0.1) / total_samples:.4f}")
@@ -486,6 +578,8 @@ def evaluate():
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ckpt": args.disco_model_ckpt,
         "k": args.top_k,
+        "cluster_source_top_k": args.cluster_source_top_k,
+        "cluster_radius_m": args.cluster_radius_m,
         "alpha": args.alpha,
         "1m_recall": np.sum(acc_record < 1) / total_samples,
         "0.5m_recall": np.sum(acc_record < 0.5) / total_samples,
@@ -495,6 +589,9 @@ def evaluate():
         "improved": f"{improved_count} ({imp_pct:.2f}%)",
         "worsened": f"{worsened_count} ({wor_pct:.2f}%)"
     }
+    if use_clustered_rerank:
+        current_result["avg_cluster_pool_k"] = float(np.mean(clustered_pool_sizes)) if clustered_pool_sizes else 0.0
+        current_result["avg_cluster_rep_k"] = float(np.mean(clustered_rep_sizes)) if clustered_rep_sizes else 0.0
     
     # 2. Read Existing
     history = []
