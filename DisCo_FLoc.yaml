@@ -18,6 +18,7 @@ feature_dim: 128
 num_heads: 4
 image_token_grid: [6, 40]
 image_self_attn_layers: 1
+pairwise_chunk_size: 16
 lr: 1.0e-4
 lr_scheduler: "cosine"
 min_lr: 1.0e-5

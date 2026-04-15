@@ -22,6 +22,7 @@ class DisCoLocModel(pl.LightningModule):
         self.num_heads = config.get("num_heads", 4)
         self.image_token_grid = tuple(config.get("image_token_grid", [6, 40]))
         self.image_self_attn_layers = config.get("image_self_attn_layers", 1)
+        self.pairwise_chunk_size = config.get("pairwise_chunk_size", 16)
 
         self.image_encoder = ImagePatchEncoder(
             encoder=config.get("image_encoder", "vits"),
@@ -125,14 +126,30 @@ class DisCoLocModel(pl.LightningModule):
         return scores, map_attn
 
     def _pairwise_scores(self, img_tokens_all, map_tokens_all):
-        score_rows = []
         num_candidates = map_tokens_all.shape[0]
+        chunk_size = min(self.pairwise_chunk_size, num_candidates)
+        score_chunks = []
 
-        for idx in range(img_tokens_all.shape[0]):
-            query_tokens = img_tokens_all[idx : idx + 1].expand(num_candidates, -1, -1)
-            score_rows.append(self._score_encoded_pairs(query_tokens, map_tokens_all))
+        for start in range(0, num_candidates, chunk_size):
+            end = min(start + chunk_size, num_candidates)
+            map_chunk = map_tokens_all[start:end]
+            current_chunk = end - start
 
-        return torch.stack(score_rows, dim=0)
+            query_tokens = (
+                img_tokens_all.unsqueeze(1)
+                .expand(-1, current_chunk, -1, -1)
+                .reshape(-1, img_tokens_all.shape[1], img_tokens_all.shape[2])
+            )
+            map_tokens = (
+                map_chunk.unsqueeze(0)
+                .expand(img_tokens_all.shape[0], -1, -1, -1)
+                .reshape(-1, map_chunk.shape[1], map_chunk.shape[2])
+            )
+
+            chunk_scores = self._score_encoded_pairs(query_tokens, map_tokens)
+            score_chunks.append(chunk_scores.view(img_tokens_all.shape[0], current_chunk))
+
+        return torch.cat(score_chunks, dim=1)
 
     def forward(self, obs_img, local_map, return_attn=False):
         img_tokens = self.encode_image(obs_img)
