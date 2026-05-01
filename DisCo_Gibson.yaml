@@ -1,12 +1,12 @@
 # General Training Configuration
 project_name: "disco_model"
-run_name: "disco_model"
+run_name: "disco_gibson"
 use_wandb: true
 gpu_ids: [0]
-epochs: 30
+epochs: 20
 batch_size: 64
 num_workers: 4
-image_log_freq: 1000  # Visualization frequency (steps)
+image_log_freq: 1000
 encoder_type: "dptv2"
 decoder_type: "rrp"
 
@@ -22,19 +22,17 @@ pairwise_chunk_size: 16
 lr: 1.0e-4
 lr_scheduler: "cosine"
 min_lr: 1.0e-5
+
 # Dataset Configuration
 datasets:
-  dataset_type: "s3d"
-  map_res: 0.02
-  data_folder: "datasets_s3d/Structured3D"
-  data_splits: "datasets_s3d/Structured3D/split.yaml"
-  val_split: "val"
+  dataset_type: "gibson"
+  map_res: 0.01
+  data_folder: "datasets_gibson/gibson_f"
+  data_splits: "datasets_gibson/gibson_f/split.yaml"
+  val_split: "test"
   floorplan_img_size: [256, 256]
-  local_map_crop_size_meters: 5.0  # Crop size for local map augmentation
-  # Pose Augmentation (Training Only)
+  local_map_crop_size_meters: 5.0
   pose_aug:
     enable: true
-    trans_range: 25   # +/- pixels (approx 0.5m)  defalut 25
-    rot_range: 0.26   # +/- radians (approx 15 deg) defalut 0.26
-
-  
+    trans_range: 25
+    rot_range: 0.26

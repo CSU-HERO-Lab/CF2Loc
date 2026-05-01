@@ -54,7 +54,8 @@ def visualize_floorplan_rays(
         agent_y_orig_pix = pose_k[1]
         yaw = pose_k[2]
 
-        pixels_per_meter = 1 / 0.02 # 50 px/m (Standard for S3D/Gibson maps)
+        map_res = float(config.get("datasets", {}).get("map_res", 0.02))
+        pixels_per_meter = 1 / map_res
         
         w0, h0 = wh_tensor[0].item(), wh_tensor[1].item() # Original map dimensions
         h_resized, w_resized = floorplan_np.shape[:2]    # Visualized map dimensions (256x256)

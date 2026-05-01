@@ -40,6 +40,7 @@ class RRPDataModule(pl.LightningDataModule):
                 split="train",
                 rgb_image_size=self.data_config["rgb_img_size"],
                 floorplan_img_size=self.data_config["floorplan_img_size"],
+                dataset_cfg=self.data_config,
             )
             self.val_dataset = RRP_Dataset(
                 data_folder=self.data_config["data_folder"],
@@ -47,6 +48,7 @@ class RRPDataModule(pl.LightningDataModule):
                 split=val_split,
                 rgb_image_size=self.data_config["rgb_img_size"],
                 floorplan_img_size=self.data_config["floorplan_img_size"],
+                dataset_cfg=self.data_config,
             )
 
     def train_dataloader(self):

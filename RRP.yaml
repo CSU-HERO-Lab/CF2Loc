@@ -46,6 +46,8 @@ D: 128
 # dataset specific parameters
 image_size: [256, 256]  #[96, 96] # width, height
 datasets:
+  dataset_type: s3d
+  map_res: 0.02
   data_folder: datasets_s3d/Structured3D
   data_splits: datasets_s3d/Structured3D/split.yaml
   val_split: val

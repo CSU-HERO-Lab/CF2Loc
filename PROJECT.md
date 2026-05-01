@@ -11,7 +11,8 @@ The S3D pipeline has two main stages:
 1. RRP predicts depth/ray observations from a single RGB image.
 2. DESDF matching proposes candidate poses on the floor plan, then DisCo reranks candidates by matching image tokens against local map patches.
 
-The current stable branch used by the user is usually `main_crosatt_cluster`.
+The current stable S3D branch used by the user is usually `main_crosatt_cluster`.
+The unified S3D + Gibson branch is `main_cross_att_cluster_s3d_and_gibson`.
 
 ## Top-Level Layout
 
@@ -22,10 +23,12 @@ The current stable branch used by the user is usually `main_crosatt_cluster`.
 - `eval/utils/`: DESDF localization, ray conversion, dataset wrappers, and DESDF generation helpers.
 - `checkpoints/`: local, usually untracked checkpoints. Do not assume contents are tracked by git.
 - `datasets_s3d/`: S3D data root. Expected to contain `Structured3D/` and `desdf/`.
-- `datasets_gibson/`: Gibson data root or symlink. Gibson-specific code is mostly on `main_gibson`.
+- `datasets_gibson/`: Gibson data root or symlink. On the unified branch, Gibson training/eval code is available in the same branch.
 - `logs/`: training/eval outputs. Many useful checkpoints live under `logs/*/checkpoints/`.
-- `DisCo_FLoc.yaml`: DisCo training config.
-- `RRP.yaml`: RRP training config. This file is often modified during experiments, so inspect it before training.
+- `DisCo_FLoc.yaml`: S3D DisCo training config.
+- `RRP.yaml`: S3D RRP training config.
+- `DisCo_Gibson.yaml`: Gibson DisCo training config.
+- `RRP_Gibson.yaml`: Gibson RRP training config.
 
 ## Data Layout
 
@@ -58,6 +61,39 @@ datasets_s3d/desdf/
 - sometimes `orn_slice`: number of orientation bins.
 
 S3D map resolution is normally `0.02 m/pixel`. DESDF grid resolution is normally `0.1 m/cell`, so the stride from map pixels to DESDF cells is `5`.
+
+Gibson data is expected under:
+
+```text
+datasets_gibson/gibson_f/
+  split.yaml
+  SCENE_NAME/
+    rgb/
+      00000-0.png
+      ...
+    map.png
+    poses.txt
+    depth40.txt
+
+datasets_gibson/gibson_t/
+  split.yaml
+  SCENE_NAME/
+    rgb/
+      00000.png
+      ...
+    map.png
+    poses.txt
+    depth40.txt
+```
+
+Gibson poses are meter coordinates centered at the map center. The unified datasets convert them to map pixels with:
+
+```text
+x_map = x_m / 0.01 + map_w / 2
+y_map = y_m / 0.01 + map_h / 2
+```
+
+Gibson map resolution is normally `0.01 m/pixel`. DESDF grid resolution is still `0.1 m/cell`, so the stride from map pixels to DESDF cells is `10`.
 
 ## Checkpoints
 
@@ -119,6 +155,12 @@ Training command:
 python training\train_rrp_model.py --config RRP.yaml
 ```
 
+Gibson RRP training uses a separate config on the unified S3D/Gibson branch:
+
+```powershell
+python training\train_rrp_model.py --config RRP_Gibson.yaml --exp_name rrp_gibson
+```
+
 This workspace also supports:
 
 ```powershell
@@ -171,6 +213,12 @@ DisCo training command:
 python training\train_disco_model.py --config DisCo_FLoc.yaml
 ```
 
+Gibson DisCo training:
+
+```powershell
+python training\train_disco_model.py --config DisCo_Gibson.yaml --run_name disco_gibson_crossatt
+```
+
 Useful overrides:
 
 ```powershell
@@ -191,7 +239,10 @@ Typical command on `main_crosatt_cluster`:
 python eval\eval_disco_model_s3d.py `
   --config DisCo_FLoc.yaml `
   --rrp_model_ckpt "checkpoints\RRP_s3d_best.ckpt" `
-  --disco_model_ckpt "checkpoints\Disco_CrossAtt_s3d_best.ckpt"
+  --disco_model_ckpt "checkpoints\Disco_CrossAtt_s3d_best.ckpt" `
+  --fov 80.0 `
+  --cluster_source_top_k 1000 `
+  --cluster_radius_m 0.6
 ```
 
 Clustered rerank is supported by:
@@ -201,7 +252,19 @@ Clustered rerank is supported by:
 --cluster_radius_m 0.6
 ```
 
-In this workspace these may already be the defaults in `eval/eval_disco_model_s3d.py`. Check the parser before giving final commands.
+On the unified branch these are the defaults in `eval/eval_disco_model_s3d.py`:
+
+```text
+--fov 80.0
+--cluster_source_top_k 1000
+--cluster_radius_m 0.6
+```
+
+For old non-cluster S3D comparisons, override:
+
+```powershell
+--cluster_source_top_k 0 --cluster_radius_m 0.0
+```
 
 Evaluation flow:
 
@@ -242,13 +305,66 @@ python eval\eval_rrp_topk_curve.py `
   --hit_radius_m 1.0
 ```
 
+## Gibson Evaluation
+
+Gibson single-frame RRP + optional DisCo rerank:
+
+```powershell
+python eval\eval_disco_model_gibson.py `
+  --config DisCo_Gibson.yaml `
+  --dataset_path ".\datasets_gibson\gibson_f" `
+  --desdf_path ".\datasets_gibson\desdf" `
+  --rrp_model_ckpt "checkpoints\RRP_gibson_best.ckpt" `
+  --disco_model_ckpt "checkpoints\DisCo_gibson_best.ckpt" `
+  --net_type rrp `
+  --fov 106.2602 `
+  --V 11
+```
+
+For Gibson RRP-only evaluation, pass an empty DisCo checkpoint:
+
+```powershell
+python eval\eval_disco_model_gibson.py `
+  --config DisCo_Gibson.yaml `
+  --dataset_path ".\datasets_gibson\gibson_f" `
+  --desdf_path ".\datasets_gibson\desdf" `
+  --rrp_model_ckpt "checkpoints\RRP_gibson_best.ckpt" `
+  --disco_model_ckpt "" `
+  --net_type rrp `
+  --fov 106.2602 `
+  --V 11
+```
+
+Gibson sequence filtering evaluation:
+
+```powershell
+python eval\eval_filtering_gibson.py `
+  --config DisCo_Gibson.yaml `
+  --dataset_path ".\datasets_gibson\gibson_t" `
+  --desdf_path ".\datasets_gibson\desdf" `
+  --rrp_model_ckpt "checkpoints\RRP_gibson_best.ckpt" `
+  --net_type rrp `
+  --fov 106.2602 `
+  --V 11 `
+  --traj_len 100 `
+  --eval_last_n 10
+```
+
+Gibson defaults are chosen to preserve the old fixed camera factor:
+
+```text
+--fov 106.2602 -> F_W ~= 3 / 8
+```
+
 ## Coordinate Conventions
 
 Be careful with coordinate frames:
 
-- `poses_map.txt` stores pose in map pixel coordinates: `[x, y, theta]`.
+- S3D `poses_map.txt` stores pose in map pixel coordinates: `[x, y, theta]`.
+- Gibson `poses.txt` stores pose in meters and is converted to map pixel coordinates by the dataset/eval code.
 - Floorplan image indexing is row/col, but poses are usually handled as x/y.
 - S3D `map.png` resolution is usually `0.02 m/pixel`.
+- Gibson `map.png` resolution is usually `0.01 m/pixel`.
 - DESDF resolution is usually `0.1 m/cell`.
 - Convert map pose to DESDF pose with:
 
@@ -257,9 +373,18 @@ x_desdf = (x_map - l) / 5
 y_desdf = (y_map - t) / 5
 ```
 
+For Gibson, use stride `10` instead of `5`:
+
+```text
+x_desdf = (x_map - l) / 10
+y_desdf = (y_map - t) / 10
+```
+
 - `localize` returns prediction in DESDF coordinates.
 - Orientation bins use `theta = orn_idx / orn_slice * 2*pi`.
 - `get_ray_from_depth` uses camera geometry and returns ray lengths, not raw column depths.
+- S3D eval default uses `--fov 80.0`.
+- Gibson eval default uses `--fov 106.2602`.
 - Local map crops rotate so the agent heading points up in the crop.
 
 ## DESDF Generation
@@ -284,6 +409,7 @@ Despite some directory names such as `desdf_generated_numba`, a git history sear
 Known branch meanings in this workspace:
 
 - `main_crosatt_cluster`: stable S3D CrossAtt DisCo plus clustered rerank line.
+- `main_cross_att_cluster_s3d_and_gibson`: unified branch that supports S3D and Gibson RRP/DisCo training and evaluation.
 - `feat/disco-clustered-rerank`: earlier clustered rerank experiment.
 - `feat/disco-map-8x8-wall-edge`: map tower experiment with higher-resolution map tokens / wall-edge channels.
 - `feat/rrp-pose-ranking-loss`: RRP pose ranking loss experiment.
@@ -309,7 +435,7 @@ The worktree is often dirty with active experiments. Do not revert unrelated cha
 - Some source files contain mojibake comments. Avoid re-encoding broad files unless necessary.
 - `eval/eval_disco_model_s3d.py --help` can fail outside the right environment because imports happen before argument parsing.
 - The default DisCo checkpoint path in code may not match the actual best checkpoint name.
-- Gibson evaluation code and S3D evaluation code live on different branches and use different protocols.
+- On older code, Gibson evaluation code and S3D evaluation code lived on different branches. On `main_cross_att_cluster_s3d_and_gibson`, both are available in one branch.
 - Do not compare frame-level filtering accuracy with f3loc-style trajectory-level success without checking the protocol.
 
 ## Minimal Sanity Checks
@@ -327,4 +453,3 @@ python -m compileall path\to\file.py
 ```
 
 For full evaluation, use the explicit checkpoint command in the S3D Evaluation section rather than relying on defaults.
-

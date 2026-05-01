@@ -32,6 +32,7 @@ parser.add_argument("--top_k", type=int, default=100, help="Number of candidates
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
 parser.add_argument("--all_imgs", default=True, help="If True, evaluate all images as reference frames in a sliding window manner (dense evaluation). Default to False (sparse evaluation).")
+parser.add_argument("--fov", type=float, default=80.0, help="Horizontal field of view used to convert depth40 to rays.")
 parser.add_argument(
     "--cluster_source_top_k",
     type=int,
@@ -171,7 +172,7 @@ def evaluate():
     gt_poses = {} # Map coordinates
 
     # S3D Params
-    F_W = 1 / np.tan(0.698132) / 2
+    F_W = 1 / (2 * np.tan(np.deg2rad(args.fov) / 2))
     map_res = 0.02
     desdf_stride = 5 # 0.1 / 0.02
 
