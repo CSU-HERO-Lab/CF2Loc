@@ -85,12 +85,19 @@ if __name__ == "__main__":
         type=str,
         help="Path to the config file",
     )
+    parser.add_argument(
+        "--exp_name",
+        default=None,
+        type=str,
+        help="Optional experiment name. Overrides run_name in config before appending timestamp.",
+    )
     args = parser.parse_args()
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
     # Project folder setup
-    run_name = config.get("run_name", "rrp_model") + "_" + time.strftime("%Y%m%d_%H%M%S")
+    base_run_name = args.exp_name or config.get("run_name", "rrp_model")
+    run_name = base_run_name + "_" + time.strftime("%Y%m%d_%H%M%S")
     config["run_name"] = run_name
     project_folder = os.path.join(
         "logs", "rrp_runs", run_name

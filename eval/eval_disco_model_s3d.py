@@ -35,13 +35,13 @@ parser.add_argument("--all_imgs", default=True, help="If True, evaluate all imag
 parser.add_argument(
     "--cluster_source_top_k",
     type=int,
-    default=0,
+    default=1000,
     help="If > 0, take the top-N RRP candidates, apply radius-based spatial clustering, and only re-rank the cluster representatives.",
 )
 parser.add_argument(
     "--cluster_radius_m",
     type=float,
-    default=0.0,
+    default=0.6,
     help="Radius in meters for spatial clustering / NMS over RRP candidates.",
 )
 
