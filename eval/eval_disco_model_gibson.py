@@ -207,6 +207,30 @@ parser.add_argument("--top_k", type=int, default=100, help="Number of candidates
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
 parser.add_argument("--all_imgs", action="store_true", help="If True, evaluate all images. Gibson script default was often sparsely sampled.")
+parser.add_argument(
+    "--cluster_source_top_k",
+    type=int,
+    default=1000,
+    help="If > 0, take the top-N RRP candidates, apply radius-based spatial clustering, and only re-rank the cluster representatives.",
+)
+parser.add_argument(
+    "--cluster_radius_m",
+    type=float,
+    default=0.6,
+    help="Radius in meters for spatial clustering / NMS over RRP candidates.",
+)
+parser.add_argument(
+    "--gpu_localize",
+    action="store_true",
+    default=True,
+    help="Run standard RRP DESDF localization on GPU with localize_fast. Falls back to CPU if CUDA is unavailable.",
+)
+parser.add_argument(
+    "--cpu_localize",
+    dest="gpu_localize",
+    action="store_false",
+    help="Disable GPU DESDF localization and use the original CPU localize path.",
+)
 # Gibson specific
 parser.add_argument("--fov", type=float, default=106.2602, help="Horizontal field of view used to convert depth40 to rays.")
 parser.add_argument("--V", type=int, default=11, help="Number of Rays")
@@ -258,8 +282,46 @@ def crop_local_map(map_img, x, y, theta, crop_size_meters, res=0.01, output_size
     
     if crop_size_px != output_size:
         local_map = cv2.resize(local_map, (output_size, output_size), interpolation=cv2.INTER_AREA)
-        
+
     return local_map
+
+
+def cluster_topk_candidates(topk_vals, topk_indices, width, radius_m, meters_per_cell):
+    if topk_indices.numel() == 0 or radius_m <= 0:
+        keep_positions = torch.arange(topk_indices.shape[0], dtype=torch.long)
+        cluster_sizes = torch.ones(topk_indices.shape[0], dtype=torch.long)
+        return topk_vals, topk_indices, keep_positions, cluster_sizes
+
+    radius_cells = radius_m / meters_per_cell
+    radius_sq = radius_cells * radius_cells
+
+    topk_y = (topk_indices // width).to(torch.float32)
+    topk_x = (topk_indices % width).to(torch.float32)
+
+    suppressed = torch.zeros(topk_indices.shape[0], dtype=torch.bool)
+    keep_positions = []
+    cluster_sizes = []
+
+    for idx in range(topk_indices.shape[0]):
+        if suppressed[idx]:
+            continue
+
+        dx = topk_x - topk_x[idx]
+        dy = topk_y - topk_y[idx]
+        cluster_mask = (~suppressed) & ((dx * dx + dy * dy) <= radius_sq)
+
+        keep_positions.append(idx)
+        cluster_sizes.append(int(cluster_mask.sum().item()))
+        suppressed |= cluster_mask
+
+    keep_positions = torch.tensor(keep_positions, dtype=torch.long)
+    cluster_sizes = torch.tensor(cluster_sizes, dtype=torch.long)
+    return (
+        topk_vals[keep_positions],
+        topk_indices[keep_positions],
+        keep_positions,
+        cluster_sizes,
+    )
 
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -299,6 +361,7 @@ def evaluate():
     desdf_path = args.desdf_path
     print("Loading desdfs...")
     desdfs = {}
+    desdf_tensors = {}
     maps = {}
     gt_poses = {} # Map coordinates
 
@@ -308,6 +371,7 @@ def evaluate():
     F_W = 1 / (2 * np.tan(np.deg2rad(args.fov) / 2))
     map_res = 0.01
     desdf_stride = 10 # 0.1 / 0.01
+    meters_per_desdf_cell = desdf_stride * map_res
 
     for scene in tqdm.tqdm(test_set.scene_names):
         # DESDF
@@ -315,6 +379,10 @@ def evaluate():
             os.path.join(desdf_path, scene, "desdf.npy"), allow_pickle=True
         ).item()
         desdfs[scene]["desdf"][desdfs[scene]["desdf"] > 20] = 20
+        if args.gpu_localize and device == "cuda":
+            desdf_tensors[scene] = torch.tensor(
+                desdfs[scene]["desdf"], dtype=torch.float32, device=device
+            )
         
         # MAP
         maps[scene] = cv2.imread(os.path.join(dataset_dir, scene, "map.png"))[:, :, 0]
@@ -354,6 +422,11 @@ def evaluate():
     # Stats 
     improved_count = 0
     worsened_count = 0
+    use_clustered_rerank = (
+        cl_model is not None and args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
+    )
+    clustered_pool_sizes = []
+    clustered_rep_sizes = []
 
     # Create visualization directories
     if args.visualize:
@@ -365,7 +438,17 @@ def evaluate():
              os.makedirs(os.path.join(viz_dir, "debug"), exist_ok=True)
         print(f"Saving visualizations to {viz_dir}")
 
-    print("Starting Evaluation...")
+    if use_clustered_rerank:
+        print(
+            "Starting Evaluation with clustered rerank "
+            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m)..."
+        )
+    else:
+        print("Starting Evaluation...")
+    print(
+        "DESDF localize: "
+        f"{'gpu_fast' if args.gpu_localize and device == 'cuda' and args.net_type != 'unloc' else 'cpu_original'}"
+    )
     
     # Determine Loop Range
     if args.scene_name is not None and args.img_id is not None:
@@ -386,7 +469,8 @@ def evaluate():
     else:
         loop_range = range(len(test_set))
 
-    for data_idx in tqdm.tqdm(loop_range):
+    eval_pbar = tqdm.tqdm(loop_range)
+    for data_idx in eval_pbar:
         # Get data
         data = test_set[data_idx]
         
@@ -436,11 +520,19 @@ def evaluate():
                 pred_depths = pred_depths_tensor.squeeze(0).detach().cpu().numpy()
                 
                 pred_rays = get_ray_from_depth(pred_depths, V=args.V, F_W=F_W)
-                pred_rays = torch.tensor(pred_rays, device="cpu")
-                
-                prob_vol, prob_dist, orientations, _ = localize(
-                    torch.tensor(desdf_data["desdf"]), pred_rays, return_np=False
-                )
+                if args.gpu_localize and device == "cuda":
+                    prob_dist, orientations, _ = localize_fast(
+                        desdf_tensors[scene],
+                        torch.tensor(pred_rays, dtype=torch.float32, device=device),
+                        return_np=False,
+                    )
+                    prob_dist = prob_dist.cpu()
+                    orientations = orientations.cpu()
+                else:
+                    pred_rays = torch.tensor(pred_rays, device="cpu")
+                    _, prob_dist, orientations, _ = localize(
+                        torch.tensor(desdf_data["desdf"]), pred_rays, return_np=False
+                    )
             
             
         # Get Best Geo Prediction
@@ -463,10 +555,26 @@ def evaluate():
             
             # Flatten prob_dist to find Top-K candidates
             flat_probs = prob_dist.flatten()
-            topk_vals, topk_indices = torch.topk(flat_probs, k=min(args.top_k, flat_probs.numel()))
+            initial_candidate_k = (
+                args.cluster_source_top_k if use_clustered_rerank else args.top_k
+            )
+            topk_vals, topk_indices = torch.topk(
+                flat_probs, k=min(initial_candidate_k, flat_probs.numel())
+            )
             
             # Convert indices back to (y, x) in desdf frame
             H_d, W_d = prob_dist.shape
+            if use_clustered_rerank:
+                clustered_pool_sizes.append(len(topk_indices))
+                topk_vals, topk_indices, _, _ = cluster_topk_candidates(
+                    topk_vals,
+                    topk_indices,
+                    width=W_d,
+                    radius_m=args.cluster_radius_m,
+                    meters_per_cell=meters_per_desdf_cell,
+                )
+                clustered_rep_sizes.append(len(topk_indices))
+
             topk_y = topk_indices // W_d
             topk_x = topk_indices % W_d
             
@@ -539,6 +647,13 @@ def evaluate():
         acc_orn = (pose_pred[2] - gt_pose_desdf[2]) % (2 * np.pi)
         acc_orn = min(acc_orn, 2 * np.pi - acc_orn) / np.pi * 180
         acc_orn_record.append(acc_orn)
+
+        if len(acc_record) > 0:
+            current_1m_recall = np.sum(np.array(acc_record) < 1) / len(acc_record)
+            postfix = {"1m_recall": f"{current_1m_recall:.4f}"}
+            if use_clustered_rerank and clustered_rep_sizes:
+                postfix["avg_rep_k"] = f"{(sum(clustered_rep_sizes) / len(clustered_rep_sizes)):.1f}"
+            eval_pbar.set_postfix(postfix)
         
         # Compare (Critical changes crossing 1m threshold)
         is_improved = (geo_error > 1.0 and acc < 1.0)
@@ -637,7 +752,22 @@ def evaluate():
     total_samples = len(acc_record)
     
     print("\n" + "="*30)
-    print(f"Results on Gibson (V={args.V}, FOV={args.fov}, Net={args.net_type})")
+    if use_clustered_rerank:
+        avg_pool_k = np.mean(clustered_pool_sizes) if clustered_pool_sizes else 0.0
+        avg_rep_k = np.mean(clustered_rep_sizes) if clustered_rep_sizes else 0.0
+        avg_cluster_size = (
+            avg_pool_k / max(avg_rep_k, 1e-6) if clustered_rep_sizes else 0.0
+        )
+        print(
+            "Results on Gibson with DisCo clustered rerank "
+            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m, "
+            f"avg_rep_k={avg_rep_k:.1f}, avg_cluster_size={avg_cluster_size:.2f}, "
+            f"alpha={args.alpha}, V={args.V}, FOV={args.fov}, Net={args.net_type})"
+        )
+    elif cl_model:
+        print(f"Results on Gibson with DisCo (k={args.top_k}, alpha={args.alpha}, V={args.V}, FOV={args.fov}, Net={args.net_type})")
+    else:
+        print(f"Results on Gibson RRP-only (V={args.V}, FOV={args.fov}, Net={args.net_type})")
     print(f"1m recall = {np.sum(acc_record < 1) / total_samples:.4f}")
     print(f"0.5m recall = {np.sum(acc_record < 0.5) / total_samples:.4f}")
     print(f"0.1m recall = {np.sum(acc_record < 0.1) / total_samples:.4f}")
@@ -662,12 +792,18 @@ def evaluate():
         "rrp_ckpt": args.rrp_model_ckpt,
         "disco_ckpt": args.disco_model_ckpt,
         "k": args.top_k,
+        "cluster_source_top_k": args.cluster_source_top_k,
+        "cluster_radius_m": args.cluster_radius_m,
+        "gpu_localize": bool(args.gpu_localize and device == "cuda" and args.net_type != "unloc"),
         "alpha": args.alpha,
         "1m_recall": np.sum(acc_record < 1) / total_samples,
         "0.5m_recall": np.sum(acc_record < 0.5) / total_samples,
         "0.1m_recall": np.sum(acc_record < 0.1) / total_samples,
         "1m_30deg_recall": np.sum(np.logical_and(acc_record < 1, acc_orn_record < 30)) / total_samples,
     }
+    if use_clustered_rerank:
+        current_result["avg_cluster_pool_k"] = float(np.mean(clustered_pool_sizes)) if clustered_pool_sizes else 0.0
+        current_result["avg_cluster_rep_k"] = float(np.mean(clustered_rep_sizes)) if clustered_rep_sizes else 0.0
     
     history = []
     if os.path.exists(log_file):

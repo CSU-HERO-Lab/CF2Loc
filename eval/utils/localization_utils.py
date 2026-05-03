@@ -78,6 +78,81 @@ def localize(
             orientations.to(torch.float32).detach().cpu(),
             pred.to(torch.float32).detach().cpu(),
         )
+
+
+def localize_fast(
+    desdf: torch.tensor,
+    rays: torch.tensor,
+    orn_slice=36,
+    return_np=True,
+    lambd=40,
+) -> Tuple[torch.tensor]:
+    """
+    Localize in DESDF without materializing the full probability volume.
+
+    This keeps computation on the input tensor device, so passing CUDA tensors
+    runs the dense orientation matching on GPU. It returns only the values used
+    by inference: max-pooled probability map, best orientation per cell, and
+    best pose.
+    """
+    if not torch.is_tensor(desdf):
+        desdf = torch.tensor(desdf)
+    if not torch.is_tensor(rays):
+        rays = torch.tensor(rays)
+
+    rays = rays.to(device=desdf.device, dtype=desdf.dtype)
+    rays = torch.flip(rays, [0])
+    O = desdf.shape[2]
+    V = rays.shape[0]
+    rays = rays.reshape((1, 1, -1))
+
+    pad_front = V // 2
+    pad_back = V - pad_front
+    pad_desdf = F.pad(desdf, [pad_front, pad_back], mode="circular")
+
+    best_scores = None
+    orientations = None
+    for i in range(O):
+        score = -torch.sum(torch.abs(pad_desdf[:, :, i : i + V] - rays), dim=2)
+        if best_scores is None:
+            best_scores = score
+            orientations = torch.zeros_like(score, dtype=torch.long)
+            continue
+
+        better = score > best_scores
+        best_scores = torch.where(better, score, best_scores)
+        orientations = torch.where(
+            better,
+            torch.full_like(orientations, i),
+            orientations,
+        )
+
+    prob_dist = torch.exp(best_scores / lambd)
+
+    pred_y, pred_x = torch.where(prob_dist == prob_dist.max())
+    if pred_y.numel() == 0:
+        pred = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=desdf.device)
+    else:
+        pred_y = pred_y[0:1]
+        pred_x = pred_x[0:1]
+        orn = orientations[pred_y, pred_x].to(torch.float32)
+        orn = orn / orn_slice * 2 * torch.pi
+        pred = torch.cat((pred_x.float(), pred_y.float(), orn.float()))
+
+    if return_np:
+        return (
+            prob_dist.detach().cpu().numpy(),
+            orientations.detach().cpu().numpy(),
+            pred.detach().cpu().numpy(),
+        )
+
+    return (
+        prob_dist.to(torch.float32).detach(),
+        orientations.detach(),
+        pred.to(torch.float32).detach(),
+    )
+
+
 def localize_unloc(
     desdf: torch.tensor,     # (H, W, O), counter clockwise
     d_hat: torch.tensor,     # (V,) - 预测深度

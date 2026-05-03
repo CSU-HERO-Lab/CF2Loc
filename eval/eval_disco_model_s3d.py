@@ -45,6 +45,18 @@ parser.add_argument(
     default=0.6,
     help="Radius in meters for spatial clustering / NMS over RRP candidates.",
 )
+parser.add_argument(
+    "--gpu_localize",
+    action="store_true",
+    default=True,
+    help="Run DESDF localization on GPU with localize_fast. Falls back to CPU if CUDA is unavailable.",
+)
+parser.add_argument(
+    "--cpu_localize",
+    dest="gpu_localize",
+    action="store_false",
+    help="Disable GPU DESDF localization and use the original CPU localize path.",
+)
 
 # Single Image Debugging
 parser.add_argument("--scene_name", type=str, default=None, help="Debug: Specific scene name")
@@ -168,6 +180,7 @@ def evaluate():
     desdf_path = args.desdf_path
     print("Loading desdfs...")
     desdfs = {}
+    desdf_tensors = {}
     maps = {}
     gt_poses = {} # Map coordinates
 
@@ -182,6 +195,10 @@ def evaluate():
             os.path.join(desdf_path, scene, "desdf.npy"), allow_pickle=True
         ).item()
         desdfs[scene]["desdf"][desdfs[scene]["desdf"] > 20] = 20
+        if args.gpu_localize and device == "cuda":
+            desdf_tensors[scene] = torch.tensor(
+                desdfs[scene]["desdf"], dtype=torch.float32, device=device
+            )
         
         # MAP
         maps[scene] = cv2.imread(os.path.join(dataset_dir, scene, "map.png"))[:, :, 0]
@@ -226,6 +243,10 @@ def evaluate():
         )
     else:
         print("Starting Evaluation...")
+    print(
+        "DESDF localize: "
+        f"{'gpu_fast' if args.gpu_localize and device == 'cuda' else 'cpu_original'}"
+    )
     
     # Determine Loop Range
     if args.scene_name is not None and args.img_id is not None:
@@ -288,13 +309,19 @@ def evaluate():
             
             # Get Rays
             pred_rays = get_ray_from_depth(pred_depths, V=9, F_W=F_W)
-            pred_rays = torch.tensor(pred_rays, device="cpu")
-            
-            # Localize (Get Probability Volume)
-            # We need prob_vol, not just the single best prediction
-            prob_vol, prob_dist, orientations, _ = localize(
-                torch.tensor(desdf_data["desdf"]), pred_rays, return_np=False
-            )
+            if args.gpu_localize and device == "cuda":
+                prob_dist, orientations, _ = localize_fast(
+                    desdf_tensors[scene],
+                    torch.tensor(pred_rays, dtype=torch.float32, device=device),
+                    return_np=False,
+                )
+                prob_dist = prob_dist.cpu()
+                orientations = orientations.cpu()
+            else:
+                pred_rays = torch.tensor(pred_rays, device="cpu")
+                _, prob_dist, orientations, _ = localize(
+                    torch.tensor(desdf_data["desdf"]), pred_rays, return_np=False
+                )
             # prob_dist: (H_desdf, W_desdf)
             
         # Get UnLoc (Geo-only) Prediction first for comparison
@@ -581,6 +608,7 @@ def evaluate():
         "k": args.top_k,
         "cluster_source_top_k": args.cluster_source_top_k,
         "cluster_radius_m": args.cluster_radius_m,
+        "gpu_localize": bool(args.gpu_localize and device == "cuda"),
         "alpha": args.alpha,
         "1m_recall": np.sum(acc_record < 1) / total_samples,
         "0.5m_recall": np.sum(acc_record < 0.5) / total_samples,
