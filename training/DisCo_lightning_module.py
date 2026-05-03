@@ -23,6 +23,7 @@ class DisCoLocModel(pl.LightningModule):
         self.image_token_grid = tuple(config.get("image_token_grid", [6, 40]))
         self.image_self_attn_layers = config.get("image_self_attn_layers", 1)
         self.pairwise_chunk_size = config.get("pairwise_chunk_size", 16)
+        self.hard_negative_mode = self._get_hard_negative_mode()
 
         self.image_encoder = ImagePatchEncoder(
             encoder=config.get("image_encoder", "vits"),
@@ -61,6 +62,36 @@ class DisCoLocModel(pl.LightningModule):
         )
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    def _get_hard_negative_mode(self):
+        dataset_cfg = self.config.get("datasets", {})
+        hard_negative_cfg = dataset_cfg.get("hard_negative", {})
+        if isinstance(hard_negative_cfg, dict):
+            mode = hard_negative_cfg.get("mode", None)
+        else:
+            mode = hard_negative_cfg
+
+        mode = dataset_cfg.get("hard_negative_mode", mode)
+        mode = (mode or "mixed").lower()
+        aliases = {
+            "pos": "position",
+            "trans": "position",
+            "translation": "position",
+            "ori": "orientation",
+            "rot": "orientation",
+            "rotation": "orientation",
+            "off": "none",
+            "false": "none",
+            "disable": "none",
+            "disabled": "none",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in ("mixed", "position", "orientation", "none"):
+            raise ValueError(
+                "Unsupported hard negative mode "
+                f"'{mode}'. Expected one of: mixed, position, orientation, none."
+            )
+        return mode
 
     def _build_image_token_mixer(self):
         if self.image_self_attn_layers <= 0:
@@ -189,7 +220,10 @@ class DisCoLocModel(pl.LightningModule):
 
         img_tokens_all = self.encode_image(obs_img)
 
-        map_all_input = torch.cat([local_map, neg_local_map], dim=0)
+        if self.hard_negative_mode == "none":
+            map_all_input = local_map
+        else:
+            map_all_input = torch.cat([local_map, neg_local_map], dim=0)
         map_tokens_all = self.encode_map(map_all_input)
 
         logits_matrix = self._pairwise_scores(img_tokens_all, map_tokens_all)

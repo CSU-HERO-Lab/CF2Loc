@@ -29,6 +29,7 @@ class DisCo_Dataset(Dataset):
         self.dataset_cfg = dataset_cfg or {}
         self.dataset_type = self.dataset_cfg.get("dataset_type", "auto").lower()
         self.map_res = float(self.dataset_cfg.get("map_res", self._default_map_res()))
+        self.hard_negative_mode = self._get_hard_negative_mode()
 
         with open(self.data_splits_path, "r", encoding="utf-8") as f:
             data_splits = yaml.safe_load(f)
@@ -40,6 +41,35 @@ class DisCo_Dataset(Dataset):
         if self.dataset_type == "gibson" or "gibson" in self.data_folder.lower():
             return 0.01
         return 0.02
+
+    def _get_hard_negative_mode(self):
+        hard_negative_cfg = self.dataset_cfg.get("hard_negative", {})
+        if isinstance(hard_negative_cfg, dict):
+            mode = hard_negative_cfg.get("mode", None)
+        else:
+            mode = hard_negative_cfg
+
+        mode = self.dataset_cfg.get("hard_negative_mode", mode)
+        mode = (mode or "mixed").lower()
+        aliases = {
+            "pos": "position",
+            "trans": "position",
+            "translation": "position",
+            "ori": "orientation",
+            "rot": "orientation",
+            "rotation": "orientation",
+            "off": "none",
+            "false": "none",
+            "disable": "none",
+            "disabled": "none",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in ("mixed", "position", "orientation", "none"):
+            raise ValueError(
+                "Unsupported hard negative mode "
+                f"'{mode}'. Expected one of: mixed, position, orientation, none."
+            )
+        return mode
 
     def _scene_format(self, scene_dir):
         if self.dataset_type in ("s3d", "structured3d"):
@@ -190,12 +220,16 @@ class DisCo_Dataset(Dataset):
             local_map_np = self.crop_local_map(raw_map, pose_aug, crop_size_meters)
             local_map = torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
 
-            neg_pose_list = self.get_hard_negative_pose(pose.numpy())
-            neg_pose = torch.tensor(neg_pose_list, dtype=torch.float32)
-            neg_local_map_np = self.crop_local_map(
-                raw_map, neg_pose.numpy(), crop_size_meters
-            )
-            neg_local_map = torch.from_numpy(neg_local_map_np).float().unsqueeze(0) / 255.0
+            if self.hard_negative_mode == "none":
+                neg_pose = torch.zeros(3, dtype=torch.float32)
+                neg_local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
+            else:
+                neg_pose_list = self.get_hard_negative_pose(pose.numpy())
+                neg_pose = torch.tensor(neg_pose_list, dtype=torch.float32)
+                neg_local_map_np = self.crop_local_map(
+                    raw_map, neg_pose.numpy(), crop_size_meters
+                )
+                neg_local_map = torch.from_numpy(neg_local_map_np).float().unsqueeze(0) / 255.0
 
         return (
             torch.as_tensor(rgb_image, dtype=torch.float32),
@@ -210,7 +244,9 @@ class DisCo_Dataset(Dataset):
 
     def get_hard_negative_pose(self, pose):
         x, y, theta = pose
-        if np.random.rand() < 0.5:
+        if self.hard_negative_mode == "orientation" or (
+            self.hard_negative_mode == "mixed" and np.random.rand() < 0.5
+        ):
             theta_new = theta + np.pi + np.random.uniform(-0.2, 0.2)
             return [x, y, theta_new]
 
