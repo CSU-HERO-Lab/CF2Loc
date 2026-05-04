@@ -37,13 +37,43 @@ parser.add_argument(
     "--cluster_source_top_k",
     type=int,
     default=1000,
-    help="If > 0, take the top-N RRP candidates, apply radius-based spatial clustering, and only re-rank the cluster representatives.",
+    help="If > 0, take the top-N RRP candidates, consolidate them, and only re-rank the representatives.",
 )
 parser.add_argument(
     "--cluster_radius_m",
     type=float,
     default=0.6,
     help="Radius in meters for spatial clustering / NMS over RRP candidates.",
+)
+parser.add_argument(
+    "--candidate_consolidation",
+    choices=["cluster", "se2_mode"],
+    default="cluster",
+    help="Representative candidate extraction method used when cluster_source_top_k > 0.",
+)
+parser.add_argument(
+    "--se2_sigma_t_m",
+    type=float,
+    default=0.6,
+    help="Translation scale in meters for SE(2)-aware mode consolidation.",
+)
+parser.add_argument(
+    "--se2_sigma_theta_deg",
+    type=float,
+    default=30.0,
+    help="Angular scale in degrees for SE(2)-aware mode consolidation.",
+)
+parser.add_argument(
+    "--se2_angle_weight",
+    type=float,
+    default=1.0,
+    help="Angular term weight for SE(2)-aware mode consolidation.",
+)
+parser.add_argument(
+    "--se2_mode_radius",
+    type=float,
+    default=1.0,
+    help="Threshold on normalized SE(2) distance for assigning candidates to a mode basin.",
 )
 parser.add_argument(
     "--gpu_localize",
@@ -146,6 +176,68 @@ def cluster_topk_candidates(topk_vals, topk_indices, width, radius_m, meters_per
         cluster_sizes,
     )
 
+
+def wrap_angle_rad(angle):
+    return torch.remainder(angle + torch.pi, 2 * torch.pi) - torch.pi
+
+
+def consolidate_se2_modes(
+    topk_vals,
+    topk_indices,
+    orientations,
+    width,
+    meters_per_cell,
+    sigma_t_m,
+    sigma_theta_deg,
+    angle_weight,
+    mode_radius,
+):
+    if topk_indices.numel() == 0:
+        keep_positions = torch.empty(0, dtype=torch.long)
+        basin_sizes = torch.empty(0, dtype=torch.long)
+        return topk_vals, topk_indices, keep_positions, basin_sizes
+
+    if mode_radius <= 0 or sigma_t_m <= 0 or sigma_theta_deg <= 0:
+        keep_positions = torch.arange(topk_indices.shape[0], dtype=torch.long)
+        basin_sizes = torch.ones(topk_indices.shape[0], dtype=torch.long)
+        return topk_vals, topk_indices, keep_positions, basin_sizes
+
+    sigma_theta = np.deg2rad(sigma_theta_deg)
+    topk_y = (topk_indices // width).to(torch.float32)
+    topk_x = (topk_indices % width).to(torch.float32)
+    topk_theta_idx = orientations[topk_y.long(), topk_x.long()].to(torch.float32)
+    topk_theta = topk_theta_idx / 36.0 * 2.0 * torch.pi
+
+    assigned = torch.zeros(topk_indices.shape[0], dtype=torch.bool)
+    keep_positions = []
+    basin_sizes = []
+
+    for idx in range(topk_indices.shape[0]):
+        if assigned[idx]:
+            continue
+
+        dx_m = (topk_x - topk_x[idx]) * meters_per_cell
+        dy_m = (topk_y - topk_y[idx]) * meters_per_cell
+        dtheta = wrap_angle_rad(topk_theta - topk_theta[idx])
+        spatial_term = (dx_m * dx_m + dy_m * dy_m) / (sigma_t_m * sigma_t_m)
+        angular_term = angle_weight * (dtheta * dtheta) / (sigma_theta * sigma_theta)
+        se2_dist = torch.sqrt(spatial_term + angular_term)
+        basin_mask = (~assigned) & (se2_dist <= mode_radius)
+
+        keep_positions.append(idx)
+        basin_sizes.append(int(basin_mask.sum().item()))
+        assigned |= basin_mask
+
+    keep_positions = torch.tensor(keep_positions, dtype=torch.long)
+    basin_sizes = torch.tensor(basin_sizes, dtype=torch.long)
+
+    return (
+        topk_vals[keep_positions],
+        topk_indices[keep_positions],
+        keep_positions,
+        basin_sizes,
+    )
+
 def evaluate():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -222,9 +314,10 @@ def evaluate():
     improved_count = 0
     worsened_count = 0
     meters_per_desdf_cell = desdf_stride * map_res
-    use_clustered_rerank = args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
-    clustered_pool_sizes = []
-    clustered_rep_sizes = []
+    use_consolidated_rerank = args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
+    consolidated_pool_sizes = []
+    consolidated_rep_sizes = []
+    consolidated_basin_sizes = []
 
     # Create visualization directories
     if args.visualize:
@@ -236,11 +329,18 @@ def evaluate():
              os.makedirs(os.path.join(viz_dir, "debug"), exist_ok=True)
         print(f"Saving visualizations to {viz_dir}")
 
-    if use_clustered_rerank:
-        print(
-            "Starting Evaluation with clustered rerank "
-            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m)..."
-        )
+    if use_consolidated_rerank:
+        if args.candidate_consolidation == "se2_mode":
+            print(
+                "Starting Evaluation with SE(2)-Aware Mode Consolidation "
+                f"(source_top_k={args.cluster_source_top_k}, sigma_t={args.se2_sigma_t_m:.2f}m, "
+                f"sigma_theta={args.se2_sigma_theta_deg:.1f}deg, rho={args.se2_mode_radius:.2f})..."
+            )
+        else:
+            print(
+                "Starting Evaluation with clustered rerank "
+                f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m)..."
+            )
     else:
         print("Starting Evaluation...")
     print(
@@ -342,7 +442,7 @@ def evaluate():
         # Flatten prob_dist to find Top-K candidates
         flat_probs = prob_dist.flatten()
         initial_candidate_k = (
-            args.cluster_source_top_k if use_clustered_rerank else args.top_k
+            args.cluster_source_top_k if use_consolidated_rerank else args.top_k
         )
         topk_vals, topk_indices = torch.topk(
             flat_probs, k=min(initial_candidate_k, flat_probs.numel())
@@ -350,17 +450,32 @@ def evaluate():
         
         # Convert indices back to (y, x) in desdf frame
         H_d, W_d = prob_dist.shape
-        cluster_sizes = None
-        if use_clustered_rerank:
-            clustered_pool_sizes.append(len(topk_indices))
-            topk_vals, topk_indices, _, cluster_sizes = cluster_topk_candidates(
-                topk_vals,
-                topk_indices,
-                width=W_d,
-                radius_m=args.cluster_radius_m,
-                meters_per_cell=meters_per_desdf_cell,
-            )
-            clustered_rep_sizes.append(len(topk_indices))
+        basin_sizes = None
+        if use_consolidated_rerank:
+            consolidated_pool_sizes.append(len(topk_indices))
+            if args.candidate_consolidation == "se2_mode":
+                topk_vals, topk_indices, _, basin_sizes = consolidate_se2_modes(
+                    topk_vals,
+                    topk_indices,
+                    orientations,
+                    width=W_d,
+                    meters_per_cell=meters_per_desdf_cell,
+                    sigma_t_m=args.se2_sigma_t_m,
+                    sigma_theta_deg=args.se2_sigma_theta_deg,
+                    angle_weight=args.se2_angle_weight,
+                    mode_radius=args.se2_mode_radius,
+                )
+            else:
+                topk_vals, topk_indices, _, basin_sizes = cluster_topk_candidates(
+                    topk_vals,
+                    topk_indices,
+                    width=W_d,
+                    radius_m=args.cluster_radius_m,
+                    meters_per_cell=meters_per_desdf_cell,
+                )
+            consolidated_rep_sizes.append(len(topk_indices))
+            if basin_sizes is not None and len(basin_sizes) > 0:
+                consolidated_basin_sizes.append(float(basin_sizes.float().mean().item()))
 
         topk_y = topk_indices // W_d
         topk_x = topk_indices % W_d
@@ -437,8 +552,8 @@ def evaluate():
 
         current_1m_recall = recall_1m_hits / len(acc_record)
         postfix = {"1m_recall": f"{current_1m_recall:.4f}"}
-        if use_clustered_rerank and clustered_rep_sizes:
-            postfix["avg_rep_k"] = f"{(sum(clustered_rep_sizes) / len(clustered_rep_sizes)):.1f}"
+        if use_consolidated_rerank and consolidated_rep_sizes:
+            postfix["avg_rep_k"] = f"{(sum(consolidated_rep_sizes) / len(consolidated_rep_sizes)):.1f}"
         eval_pbar.set_postfix(postfix)
         
         # Compare (Critical changes crossing 1m threshold)
@@ -569,17 +684,27 @@ def evaluate():
     total_samples = len(acc_record)
     
     print("\n" + "="*30)
-    if use_clustered_rerank:
-        avg_pool_k = np.mean(clustered_pool_sizes) if clustered_pool_sizes else 0.0
-        avg_rep_k = np.mean(clustered_rep_sizes) if clustered_rep_sizes else 0.0
-        avg_cluster_size = (
-            avg_pool_k / max(avg_rep_k, 1e-6) if clustered_rep_sizes else 0.0
-        )
-        print(
-            "Results with DisCo clustered rerank "
-            f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m, "
-            f"avg_rep_k={avg_rep_k:.1f}, avg_cluster_size={avg_cluster_size:.2f}, alpha={args.alpha})"
-        )
+    if use_consolidated_rerank:
+        avg_pool_k = np.mean(consolidated_pool_sizes) if consolidated_pool_sizes else 0.0
+        avg_rep_k = np.mean(consolidated_rep_sizes) if consolidated_rep_sizes else 0.0
+        avg_basin_size = np.mean(consolidated_basin_sizes) if consolidated_basin_sizes else 0.0
+        if args.candidate_consolidation == "se2_mode":
+            print(
+                "Results with DisCo SE(2)-Aware Mode Consolidation "
+                f"(source_top_k={args.cluster_source_top_k}, sigma_t={args.se2_sigma_t_m:.2f}m, "
+                f"sigma_theta={args.se2_sigma_theta_deg:.1f}deg, rho={args.se2_mode_radius:.2f}, "
+                f"avg_rep_k={avg_rep_k:.1f}, avg_basin_size={avg_basin_size:.2f}, "
+                f"alpha={args.alpha})"
+            )
+        else:
+            avg_cluster_size = (
+                avg_pool_k / max(avg_rep_k, 1e-6) if consolidated_rep_sizes else 0.0
+            )
+            print(
+                "Results with DisCo clustered rerank "
+                f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m, "
+                f"avg_rep_k={avg_rep_k:.1f}, avg_cluster_size={avg_cluster_size:.2f}, alpha={args.alpha})"
+            )
     else:
         print(f"Results with DisCo (k={args.top_k}, alpha={args.alpha})")
     print(f"1m recall = {np.sum(acc_record < 1) / total_samples:.4f}")
@@ -606,6 +731,7 @@ def evaluate():
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "ckpt": args.disco_model_ckpt,
         "k": args.top_k,
+        "candidate_consolidation": args.candidate_consolidation if use_consolidated_rerank else "none",
         "cluster_source_top_k": args.cluster_source_top_k,
         "cluster_radius_m": args.cluster_radius_m,
         "gpu_localize": bool(args.gpu_localize and device == "cuda"),
@@ -618,9 +744,15 @@ def evaluate():
         "improved": f"{improved_count} ({imp_pct:.2f}%)",
         "worsened": f"{worsened_count} ({wor_pct:.2f}%)"
     }
-    if use_clustered_rerank:
-        current_result["avg_cluster_pool_k"] = float(np.mean(clustered_pool_sizes)) if clustered_pool_sizes else 0.0
-        current_result["avg_cluster_rep_k"] = float(np.mean(clustered_rep_sizes)) if clustered_rep_sizes else 0.0
+    if use_consolidated_rerank:
+        current_result["avg_cluster_pool_k"] = float(np.mean(consolidated_pool_sizes)) if consolidated_pool_sizes else 0.0
+        current_result["avg_cluster_rep_k"] = float(np.mean(consolidated_rep_sizes)) if consolidated_rep_sizes else 0.0
+        current_result["avg_basin_size"] = float(np.mean(consolidated_basin_sizes)) if consolidated_basin_sizes else 0.0
+        if args.candidate_consolidation == "se2_mode":
+            current_result["se2_sigma_t_m"] = args.se2_sigma_t_m
+            current_result["se2_sigma_theta_deg"] = args.se2_sigma_theta_deg
+            current_result["se2_angle_weight"] = args.se2_angle_weight
+            current_result["se2_mode_radius"] = args.se2_mode_radius
     
     # 2. Read Existing
     history = []
