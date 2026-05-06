@@ -48,7 +48,7 @@ parser.add_argument(
 parser.add_argument(
     "--candidate_consolidation",
     choices=["cluster", "se2_mode"],
-    default="cluster",
+    default="se2_mode",
     help="Representative candidate extraction method used when cluster_source_top_k > 0.",
 )
 parser.add_argument(
