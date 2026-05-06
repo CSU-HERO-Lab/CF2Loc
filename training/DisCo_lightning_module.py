@@ -24,6 +24,9 @@ class DisCoLocModel(pl.LightningModule):
         self.image_self_attn_layers = config.get("image_self_attn_layers", 1)
         self.pairwise_chunk_size = config.get("pairwise_chunk_size", 16)
         self.hard_negative_mode = self._get_hard_negative_mode()
+        self.use_cls_global_fusion = bool(config.get("use_cls_global_fusion", False))
+        self.use_cls_query_token = bool(config.get("use_cls_query_token", False))
+        self.use_image_cls_token = self.use_cls_global_fusion or self.use_cls_query_token
 
         self.image_encoder = ImagePatchEncoder(
             encoder=config.get("image_encoder", "vits"),
@@ -33,10 +36,13 @@ class DisCoLocModel(pl.LightningModule):
                 "dptv2_ckpt_path", "checkpoints/depth_anything_v2_vits.pth"
             ),
             freeze_backbone=config.get("freeze_image_backbone", True),
+            use_cls_token=self.use_image_cls_token,
         )
 
         self.image_token_norm = nn.LayerNorm(self.feature_dim)
         self.image_self_attn = self._build_image_token_mixer()
+        if self.use_image_cls_token:
+            self.cls_token_norm = nn.LayerNorm(self.feature_dim)
 
         self.map_encoder = MapEncoder(input_channels=1, feature_dim=self.feature_dim)
         self.map_pos_mlp = nn.Sequential(
@@ -54,6 +60,12 @@ class DisCoLocModel(pl.LightningModule):
         self.cross_attn_norm = nn.LayerNorm(self.feature_dim)
 
         self.token_score_head = nn.Linear(self.feature_dim, 1)
+        if self.use_cls_global_fusion:
+            self.cls_pair_fusion = nn.Sequential(
+                nn.LayerNorm(self.feature_dim * 2),
+                nn.Linear(self.feature_dim * 2, self.feature_dim),
+                nn.GELU(),
+            )
         self.score_head = nn.Sequential(
             nn.LayerNorm(self.feature_dim),
             nn.Linear(self.feature_dim, self.feature_dim),
@@ -113,9 +125,22 @@ class DisCoLocModel(pl.LightningModule):
         )
 
     def encode_image(self, obs_img):
-        img_tokens = self.image_encoder(obs_img)
+        image_features = self.image_encoder(obs_img)
+        if self.use_image_cls_token:
+            img_tokens, cls_token = image_features
+        else:
+            img_tokens = image_features
+            cls_token = None
+
         img_tokens = self.image_token_norm(img_tokens)
         img_tokens = self.image_self_attn(img_tokens)
+        if cls_token is not None:
+            cls_token = self.cls_token_norm(cls_token)
+            if self.use_cls_query_token:
+                img_tokens = torch.cat([cls_token.unsqueeze(1), img_tokens], dim=1)
+            if not self.use_cls_global_fusion:
+                return img_tokens
+            return img_tokens, cls_token
         return img_tokens
 
     def encode_map(self, local_map):
@@ -136,7 +161,26 @@ class DisCoLocModel(pl.LightningModule):
         pos_enc = self.map_pos_mlp(pos_grid)
         return pos_enc.expand(batch_size, -1, -1)
 
-    def _score_encoded_pairs(self, img_tokens, map_tokens, return_attn=False):
+    def _split_image_features(self, image_features):
+        if isinstance(image_features, tuple):
+            return image_features
+        return image_features, None
+
+    def _slice_image_features(self, image_features, item):
+        img_tokens, cls_token = self._split_image_features(image_features)
+        if cls_token is None:
+            return img_tokens[item]
+        return img_tokens[item], cls_token[item]
+
+    def _expand_image_features(self, image_features, batch_size):
+        img_tokens, cls_token = self._split_image_features(image_features)
+        img_tokens = img_tokens.expand(batch_size, -1, -1)
+        if cls_token is None:
+            return img_tokens
+        cls_token = cls_token.expand(batch_size, -1)
+        return img_tokens, cls_token
+
+    def _score_encoded_pairs(self, img_tokens, map_tokens, cls_features=None, return_attn=False):
         aligned_tokens, attn_weights = self.cross_attn(
             query=img_tokens,
             key=map_tokens,
@@ -148,6 +192,10 @@ class DisCoLocModel(pl.LightningModule):
         token_logits = self.token_score_head(fused_tokens).squeeze(-1)
         token_weights = torch.softmax(token_logits, dim=1)
         pooled = torch.sum(fused_tokens * token_weights.unsqueeze(-1), dim=1)
+        if self.use_cls_global_fusion:
+            if cls_features is None:
+                raise ValueError("cls_features is required when use_cls_global_fusion=True.")
+            pooled = self.cls_pair_fusion(torch.cat([pooled, cls_features], dim=-1))
         scores = self.score_head(pooled).squeeze(-1)
 
         if not return_attn:
@@ -156,7 +204,8 @@ class DisCoLocModel(pl.LightningModule):
         map_attn = torch.einsum("bl,blm->bm", token_weights, attn_weights)
         return scores, map_attn
 
-    def _pairwise_scores(self, img_tokens_all, map_tokens_all):
+    def _pairwise_scores(self, image_features_all, map_tokens_all):
+        img_tokens_all, cls_tokens_all = self._split_image_features(image_features_all)
         num_candidates = map_tokens_all.shape[0]
         chunk_size = min(self.pairwise_chunk_size, num_candidates)
         score_chunks = []
@@ -176,42 +225,65 @@ class DisCoLocModel(pl.LightningModule):
                 .expand(img_tokens_all.shape[0], -1, -1, -1)
                 .reshape(-1, map_chunk.shape[1], map_chunk.shape[2])
             )
+            cls_features = None
+            if cls_tokens_all is not None:
+                cls_features = (
+                    cls_tokens_all.unsqueeze(1)
+                    .expand(-1, current_chunk, -1)
+                    .reshape(-1, cls_tokens_all.shape[1])
+                )
 
-            chunk_scores = self._score_encoded_pairs(query_tokens, map_tokens)
+            chunk_scores = self._score_encoded_pairs(
+                query_tokens, map_tokens, cls_features=cls_features
+            )
             score_chunks.append(chunk_scores.view(img_tokens_all.shape[0], current_chunk))
 
         return torch.cat(score_chunks, dim=1)
 
     def forward(self, obs_img, local_map, return_attn=False):
-        img_tokens = self.encode_image(obs_img)
+        image_features = self.encode_image(obs_img)
         map_tokens = self.encode_map(local_map)
+        img_tokens, cls_token = self._split_image_features(image_features)
         outputs = self._score_encoded_pairs(
-            img_tokens, map_tokens, return_attn=return_attn
+            img_tokens, map_tokens, cls_features=cls_token, return_attn=return_attn
         )
 
         if return_attn:
             pair_scores, map_attn = outputs
-            return img_tokens, pair_scores, map_attn
+            return image_features, pair_scores, map_attn
 
-        return img_tokens, outputs
+        return image_features, outputs
 
     def score_candidates(self, img_tokens, candidate_maps, return_attn=False):
+        cls_token = None
+        if isinstance(img_tokens, tuple):
+            img_tokens, cls_token = img_tokens
+
         if img_tokens.dim() == 2:
             img_tokens = img_tokens.unsqueeze(0)
+        if cls_token is not None and cls_token.dim() == 1:
+            cls_token = cls_token.unsqueeze(0)
 
         num_candidates = candidate_maps.shape[0]
         map_tokens = self.encode_map(candidate_maps)
 
         if img_tokens.shape[0] == 1:
             img_tokens = img_tokens.expand(num_candidates, -1, -1)
+            if cls_token is not None:
+                cls_token = cls_token.expand(num_candidates, -1)
         elif img_tokens.shape[0] != num_candidates:
             raise ValueError(
                 f"Image token batch ({img_tokens.shape[0]}) must be 1 or match the "
                 f"candidate count ({num_candidates})."
             )
+        elif cls_token is not None and cls_token.shape[0] != num_candidates:
+            raise ValueError(
+                f"CLS token batch ({cls_token.shape[0]}) must be 1 or match the "
+                f"candidate count ({num_candidates})."
+            )
 
         return self._score_encoded_pairs(
-            img_tokens, map_tokens, return_attn=return_attn
+            img_tokens, map_tokens, cls_features=cls_token, return_attn=return_attn
         )
 
     def training_step(self, batch, batch_idx):
@@ -256,11 +328,18 @@ class DisCoLocModel(pl.LightningModule):
                 )
 
                 for idx in range(num_viz):
-                    query_tokens = img_tokens_all[idx : idx + 1].expand(
-                        map_tokens_all.shape[0], -1, -1
+                    query_features = self._expand_image_features(
+                        self._slice_image_features(img_tokens_all, slice(idx, idx + 1)),
+                        map_tokens_all.shape[0],
+                    )
+                    query_tokens, query_cls = self._split_image_features(
+                        query_features
                     )
                     _, map_attn = self._score_encoded_pairs(
-                        query_tokens, map_tokens_all, return_attn=True
+                        query_tokens,
+                        map_tokens_all,
+                        cls_features=query_cls,
+                        return_attn=True,
                     )
                     viz_attn = map_attn[idx].unsqueeze(0)
 
@@ -329,11 +408,18 @@ class DisCoLocModel(pl.LightningModule):
                 )
 
                 for idx in range(num_viz):
-                    query_tokens = img_tokens_all[idx : idx + 1].expand(
-                        map_tokens_all.shape[0], -1, -1
+                    query_features = self._expand_image_features(
+                        self._slice_image_features(img_tokens_all, slice(idx, idx + 1)),
+                        map_tokens_all.shape[0],
+                    )
+                    query_tokens, query_cls = self._split_image_features(
+                        query_features
                     )
                     _, map_attn = self._score_encoded_pairs(
-                        query_tokens, map_tokens_all, return_attn=True
+                        query_tokens,
+                        map_tokens_all,
+                        cls_features=query_cls,
+                        return_attn=True,
                     )
                     viz_attn = map_attn[idx].unsqueeze(0)
 

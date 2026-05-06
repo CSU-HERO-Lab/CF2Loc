@@ -17,6 +17,7 @@ class ImagePatchEncoder(nn.Module):
         intermediate_layer_idx=11,
         checkpoint_path=None,
         freeze_backbone=True,
+        use_cls_token=False,
     ):
         super().__init__()
 
@@ -27,6 +28,7 @@ class ImagePatchEncoder(nn.Module):
         self.target_size = tuple(target_size)
         self.intermediate_layer_idx = intermediate_layer_idx
         self.patch_size = 14
+        self.use_cls_token = use_cls_token
 
         params = torch.load(checkpoint_path, map_location="cpu")
         self.backbone = DINOv2(model_name=encoder)
@@ -43,6 +45,8 @@ class ImagePatchEncoder(nn.Module):
                 param.requires_grad = False
 
         self.proj = nn.Conv2d(384, feature_dim, kernel_size=1)
+        if self.use_cls_token:
+            self.cls_proj = nn.Linear(384, feature_dim)
         self.pos_mlp = nn.Sequential(
             nn.Linear(2, feature_dim),
             nn.GELU(),
@@ -56,11 +60,16 @@ class ImagePatchEncoder(nn.Module):
         pad_width = int(math.ceil(width / self.patch_size) * self.patch_size)
         img_padded = F.pad(obs_img, (0, pad_width - width, 0, pad_height - height))
 
-        patch_tokens = self.backbone.get_intermediate_layers(
+        image_features = self.backbone.get_intermediate_layers(
             img_padded,
             [self.intermediate_layer_idx],
-            return_class_token=False,
+            return_class_token=self.use_cls_token,
         )[0]
+        if self.use_cls_token:
+            patch_tokens, cls_token = image_features
+        else:
+            patch_tokens = image_features
+            cls_token = None
 
         grid_h = pad_height // self.patch_size
         grid_w = pad_width // self.patch_size
@@ -79,6 +88,9 @@ class ImagePatchEncoder(nn.Module):
         tokens = tokens + self._build_2d_positional_encoding(
             feat_h, feat_w, bsz, tokens.device, tokens.dtype
         )
+
+        if self.use_cls_token:
+            return tokens, self.cls_proj(cls_token)
 
         return tokens
 
