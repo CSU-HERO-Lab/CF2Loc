@@ -27,7 +27,7 @@ parser.add_argument("--visualize", action="store_true")
 
 # New Args for CrossModal
 parser.add_argument("--rrp_model_ckpt", type=str, default="checkpoints/RRP_s3d_best.ckpt", help="Path to RRP checkpoint")
-parser.add_argument("--disco_model_ckpt", type=str, default="checkpoints/DisCo_s3d_best.ckpt", help="Path to DisCo checkpoint")
+parser.add_argument("--disco_model_ckpt", type=str, default="checkpoints/DisCo_s3d_best.ckpt", help="Path to DisCo checkpoint. Use an empty string to run RRP only.")
 parser.add_argument("--top_k", type=int, default=100, help="Number of candidates to re-rank")
 parser.add_argument("--alpha", type=float, default=0.5, help="Weight of semantic score")
 parser.add_argument("--disco_only", action="store_true", help="If True, ignore geometric probability and only use cross-modal score")
@@ -245,10 +245,12 @@ def evaluate():
     rrp_plt = RRPLightningModule.load_from_checkpoint(args.rrp_model_ckpt , map_location=device)
     rrp_model = rrp_plt.model.to(device)
     rrp_model.eval()
-    # --- 2. Load DisCo Model ---
-    cl_model = DisCoLocModel.load_from_checkpoint(args.disco_model_ckpt, config=config, map_location=device)  
-    cl_model.to(device)
-    cl_model.eval()
+    # --- 2. Load DisCo Model (Optional) ---
+    cl_model = None
+    if args.disco_model_ckpt:
+        cl_model = DisCoLocModel.load_from_checkpoint(args.disco_model_ckpt, config=config, map_location=device)
+        cl_model.to(device)
+        cl_model.eval()
 
     # --- 3. Setup Dataset ---
     L = 3
@@ -314,7 +316,9 @@ def evaluate():
     improved_count = 0
     worsened_count = 0
     meters_per_desdf_cell = desdf_stride * map_res
-    use_consolidated_rerank = args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
+    use_consolidated_rerank = (
+        cl_model is not None and args.cluster_source_top_k > 0 and args.cluster_radius_m > 0
+    )
     consolidated_pool_sizes = []
     consolidated_rep_sizes = []
     consolidated_basin_sizes = []
@@ -433,112 +437,119 @@ def evaluate():
             geo_error = 999.0
             geo_pred = np.array([0, 0])
 
-        # --- 2. Semantic Re-ranking ---
-        
-        # Get image embedding (only once)
-        with torch.no_grad():
-            img_tokens = cl_model.encode_image(obs_img_tensor)
-        
-        # Flatten prob_dist to find Top-K candidates
-        flat_probs = prob_dist.flatten()
-        initial_candidate_k = (
-            args.cluster_source_top_k if use_consolidated_rerank else args.top_k
-        )
-        topk_vals, topk_indices = torch.topk(
-            flat_probs, k=min(initial_candidate_k, flat_probs.numel())
-        )
-        
-        # Convert indices back to (y, x) in desdf frame
-        H_d, W_d = prob_dist.shape
-        basin_sizes = None
-        if use_consolidated_rerank:
-            consolidated_pool_sizes.append(len(topk_indices))
-            if args.candidate_consolidation == "se2_mode":
-                topk_vals, topk_indices, _, basin_sizes = consolidate_se2_modes(
-                    topk_vals,
-                    topk_indices,
-                    orientations,
-                    width=W_d,
-                    meters_per_cell=meters_per_desdf_cell,
-                    sigma_t_m=args.se2_sigma_t_m,
-                    sigma_theta_deg=args.se2_sigma_theta_deg,
-                    angle_weight=args.se2_angle_weight,
-                    mode_radius=args.se2_mode_radius,
-                )
-            else:
-                topk_vals, topk_indices, _, basin_sizes = cluster_topk_candidates(
-                    topk_vals,
-                    topk_indices,
-                    width=W_d,
-                    radius_m=args.cluster_radius_m,
-                    meters_per_cell=meters_per_desdf_cell,
-                )
-            consolidated_rep_sizes.append(len(topk_indices))
-            if basin_sizes is not None and len(basin_sizes) > 0:
-                consolidated_basin_sizes.append(float(basin_sizes.float().mean().item()))
+        final_scores = torch.tensor([], device=device)
+        semantic_weight = torch.tensor([], device=device)
 
-        topk_y = topk_indices // W_d
-        topk_x = topk_indices % W_d
-        
-        # Prepare batch for Map Encoder
-        local_maps = []
-        valid_indices = []
-        
-        scene_map = maps[scene]
-        
-        for i in range(len(topk_indices)):
-            py, px = topk_y[i].item(), topk_x[i].item()
-            
-            # Get orientation from UnLoc result for this cell
-            # orientations is (H, W), stores index 0..35
-            orn_idx = orientations[py, px].item()
-            theta = (orn_idx / 36) * 2 * np.pi
-            
-            # Convert desdf (px, py) back to map (map_x, map_y)
-            map_x = px * desdf_stride + desdf_data["l"]
-            map_y = py * desdf_stride + desdf_data["t"]
-            
-            # Crop
-            crop_local_map_size = data_config.get("local_map_crop_size_meters", 5.0) # meters
-            lmap = crop_local_map(scene_map, map_x, map_y, theta, crop_size_meters=crop_local_map_size)
-            lmap_tensor = torch.from_numpy(lmap).float() / 255.0
-            local_maps.append(lmap_tensor.unsqueeze(0)) # (1, H, W)
-            valid_indices.append(i)
-            
-        if local_maps:
-            local_maps_batch = torch.stack(local_maps).to(device) # (K, 1, 128, 128)
-            
+        if cl_model:
+            # --- 2. Semantic Re-ranking ---
+
+            # Get image embedding (only once)
             with torch.no_grad():
-                # Use model's internal attention logic to score candidates
-                sim_scores = cl_model.score_candidates(img_tokens, local_maps_batch)
-                
-                # Fusion
-                geo_probs = topk_vals.to(device)
-                
-                semantic_weight = torch.exp(sim_scores * args.alpha)
-                
-                if args.disco_only:
-                    final_scores = semantic_weight
+                img_tokens = cl_model.encode_image(obs_img_tensor)
+
+            # Flatten prob_dist to find Top-K candidates
+            flat_probs = prob_dist.flatten()
+            initial_candidate_k = (
+                args.cluster_source_top_k if use_consolidated_rerank else args.top_k
+            )
+            topk_vals, topk_indices = torch.topk(
+                flat_probs, k=min(initial_candidate_k, flat_probs.numel())
+            )
+
+            # Convert indices back to (y, x) in desdf frame
+            H_d, W_d = prob_dist.shape
+            basin_sizes = None
+            if use_consolidated_rerank:
+                consolidated_pool_sizes.append(len(topk_indices))
+                if args.candidate_consolidation == "se2_mode":
+                    topk_vals, topk_indices, _, basin_sizes = consolidate_se2_modes(
+                        topk_vals,
+                        topk_indices,
+                        orientations,
+                        width=W_d,
+                        meters_per_cell=meters_per_desdf_cell,
+                        sigma_t_m=args.se2_sigma_t_m,
+                        sigma_theta_deg=args.se2_sigma_theta_deg,
+                        angle_weight=args.se2_angle_weight,
+                        mode_radius=args.se2_mode_radius,
+                    )
                 else:
-                    final_scores = geo_probs * semantic_weight
-                
-                # Find best in Top-K
-                best_idx_in_k = torch.argmax(final_scores).item()
-                
-                # Retrieve original desdf coordinates
-                final_i = valid_indices[best_idx_in_k]
-                final_y = topk_y[final_i].item()
-                final_x = topk_x[final_i].item()
-                
-                # Get Pose
-                final_orn_idx = orientations[final_y, final_x].item()
-                final_orn = (final_orn_idx / 36) * 2 * np.pi
-                pose_pred = np.array([final_x, final_y, final_orn])
+                    topk_vals, topk_indices, _, basin_sizes = cluster_topk_candidates(
+                        topk_vals,
+                        topk_indices,
+                        width=W_d,
+                        radius_m=args.cluster_radius_m,
+                        meters_per_cell=meters_per_desdf_cell,
+                    )
+                consolidated_rep_sizes.append(len(topk_indices))
+                if basin_sizes is not None and len(basin_sizes) > 0:
+                    consolidated_basin_sizes.append(float(basin_sizes.float().mean().item()))
+
+            topk_y = topk_indices // W_d
+            topk_x = topk_indices % W_d
+
+            # Prepare batch for Map Encoder
+            local_maps = []
+            valid_indices = []
+
+            scene_map = maps[scene]
+
+            for i in range(len(topk_indices)):
+                py, px = topk_y[i].item(), topk_x[i].item()
+
+                # Get orientation from UnLoc result for this cell
+                # orientations is (H, W), stores index 0..35
+                orn_idx = orientations[py, px].item()
+                theta = (orn_idx / 36) * 2 * np.pi
+
+                # Convert desdf (px, py) back to map (map_x, map_y)
+                map_x = px * desdf_stride + desdf_data["l"]
+                map_y = py * desdf_stride + desdf_data["t"]
+
+                # Crop
+                crop_local_map_size = data_config.get("local_map_crop_size_meters", 5.0) # meters
+                lmap = crop_local_map(scene_map, map_x, map_y, theta, crop_size_meters=crop_local_map_size)
+                lmap_tensor = torch.from_numpy(lmap).float() / 255.0
+                local_maps.append(lmap_tensor.unsqueeze(0)) # (1, H, W)
+                valid_indices.append(i)
+
+            if local_maps:
+                local_maps_batch = torch.stack(local_maps).to(device) # (K, 1, 128, 128)
+
+                with torch.no_grad():
+                    # Use model's internal attention logic to score candidates
+                    sim_scores = cl_model.score_candidates(img_tokens, local_maps_batch)
+
+                    # Fusion
+                    geo_probs = topk_vals.to(device)
+
+                    semantic_weight = torch.exp(sim_scores * args.alpha)
+
+                    if args.disco_only:
+                        final_scores = semantic_weight
+                    else:
+                        final_scores = geo_probs * semantic_weight
+
+                    # Find best in Top-K
+                    best_idx_in_k = torch.argmax(final_scores).item()
+
+                    # Retrieve original desdf coordinates
+                    final_i = valid_indices[best_idx_in_k]
+                    final_y = topk_y[final_i].item()
+                    final_x = topk_x[final_i].item()
+
+                    # Get Pose
+                    final_orn_idx = orientations[final_y, final_x].item()
+                    final_orn = (final_orn_idx / 36) * 2 * np.pi
+                    pose_pred = np.array([final_x, final_y, final_orn])
+            else:
+                # Fallback
+                pose_pred = np.array([geo_pred_x[0].item(), geo_pred_y[0].item(), 0.0])
         else:
-            # Fallback
-            pose_pred = np.array([geo_pred_x[0].item(), geo_pred_y[0].item(), 0.0])
-            final_scores = torch.tensor([], device=device)
-            semantic_weight = torch.tensor([], device=device)
+            y_g, x_g = int(geo_pred[1]), int(geo_pred[0])
+            orn_idx = orientations[y_g, x_g].item()
+            orn = (orn_idx / 36) * 2 * np.pi
+            pose_pred = np.array([geo_pred[0], geo_pred[1], orn])
 
         # --- Accuracy ---
         acc = np.linalg.norm(pose_pred[:2] - gt_pose_desdf[:2], 2.0) * 0.1
@@ -569,7 +580,7 @@ def evaluate():
         # Force viz if debug mode (scene_name is set)
         should_viz = args.visualize and (is_improved or is_degraded or args.scene_name is not None)
         
-        if should_viz:
+        if should_viz and cl_model:
             if args.scene_name:
                 save_folder = "debug"
             else:
@@ -705,8 +716,10 @@ def evaluate():
                 f"(source_top_k={args.cluster_source_top_k}, radius={args.cluster_radius_m:.2f}m, "
                 f"avg_rep_k={avg_rep_k:.1f}, avg_cluster_size={avg_cluster_size:.2f}, alpha={args.alpha})"
             )
-    else:
+    elif cl_model:
         print(f"Results with DisCo (k={args.top_k}, alpha={args.alpha})")
+    else:
+        print(f"Results on S3D RRP-only (FOV={args.fov}, Net={args.net_type})")
     print(f"1m recall = {np.sum(acc_record < 1) / total_samples:.4f}")
     print(f"0.5m recall = {np.sum(acc_record < 0.5) / total_samples:.4f}")
     print(f"0.1m recall = {np.sum(acc_record < 0.1) / total_samples:.4f}")
@@ -716,8 +729,9 @@ def evaluate():
     
     imp_pct = improved_count / total_samples * 100
     wor_pct = worsened_count / total_samples * 100
-    print(f"Improved samples: {improved_count} ({imp_pct:.2f}%)")
-    print(f"Worsened samples: {worsened_count} ({wor_pct:.2f}%)")
+    if cl_model:
+        print(f"Improved samples: {improved_count} ({imp_pct:.2f}%)")
+        print(f"Worsened samples: {worsened_count} ({wor_pct:.2f}%)")
     print("="*30)
 
     # --- Log Results to File ---
@@ -729,6 +743,7 @@ def evaluate():
     # 1. Current Result
     current_result = {
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rrp_ckpt": args.rrp_model_ckpt,
         "ckpt": args.disco_model_ckpt,
         "k": args.top_k,
         "candidate_consolidation": args.candidate_consolidation if use_consolidated_rerank else "none",

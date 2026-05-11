@@ -350,6 +350,19 @@ def build_first_frame_disco_prior(
     prior = prior / (prior.sum() + 1e-12)
     return prior
 
+
+def normalized_entropy(prob):
+    """
+    Return entropy normalized by the uniform entropy over the same state space.
+    Low values indicate a concentrated belief; values near 1 indicate ambiguity.
+    """
+    prob = prob / (prob.sum() + 1e-15)
+    prob_flat = prob.flatten()
+    entropy = -(prob_flat * torch.log(prob_flat + 1e-15)).sum()
+    max_entropy = torch.log(torch.tensor(prob_flat.numel(), device=prob.device, dtype=prob.dtype))
+    return entropy / (max_entropy + 1e-15)
+
+
 def evaluate_filtering():
     parser = argparse.ArgumentParser(description="Filtering evaluation.")
     parser.add_argument("--config", "-c", default="DisCo_Gibson.yaml", type=str)
@@ -363,10 +376,18 @@ def evaluate_filtering():
     parser.add_argument("--max_trajectories", type=int, default=None, help="Optional cap on evaluated trajectory chunks for quick tests")
     parser.add_argument("--first_frame_disco_prior", action="store_true", help="Use DisCo reranking as the initial prior for each trajectory")
     parser.add_argument("--disco_model_ckpt", type=str, default=None, help="Path to DisCo checkpoint used by --first_frame_disco_prior")
+    parser.add_argument("--disco_prior_interval", type=int, default=0, help="Apply DisCo prior correction every N filtering steps; 0 disables keyframe correction")
     parser.add_argument("--disco_top_k", type=int, default=100, help="Number of RRP candidates reranked by DisCo for the initial prior")
     parser.add_argument("--disco_alpha", type=float, default=0.5, help="Scale applied to DisCo similarity before exponentiation")
     parser.add_argument("--disco_prior_eps", type=float, default=1e-12, help="Small prior mass assigned outside DisCo top-k candidates")
     parser.add_argument("--disco_prior_mode", type=str, default="semantic", choices=["semantic", "combined"], help="Use semantic-only or geometry*semantic weights for the initial prior")
+    parser.add_argument("--disco_entropy_threshold", type=float, default=None, help="If set, apply keyframe DisCo correction only when the pre-DisCo posterior normalized entropy is at least this value")
+    parser.add_argument("--desdf_cap", type=float, default=20.0, help="Clamp DESDF distances to this value before localization. f3loc uses 10.")
+    parser.add_argument("--motion_sig_o", type=float, default=0.1, help="Orientation stddev for the filtering transition model.")
+    parser.add_argument("--motion_sig_x", type=float, default=0.1, help="Forward translation stddev in meters for the filtering transition model.")
+    parser.add_argument("--motion_sig_y", type=float, default=0.1, help="Lateral translation stddev in meters for the filtering transition model.")
+    parser.add_argument("--motion_tsize", type=int, default=11, help="Translation filter size for the filtering transition model. f3loc uses 7.")
+    parser.add_argument("--motion_rsize", type=int, default=11, help="Rotation filter size for the filtering transition model. f3loc uses 7.")
     
     # Gibson specific
     parser.add_argument("--fov", type=float, default=106.2602, help="Horizontal field of view used to convert depth40 to rays.")
@@ -390,9 +411,10 @@ def evaluate_filtering():
     rrp_model.eval()
 
     cl_model = None
-    if args.first_frame_disco_prior:
+    use_disco_prior = args.first_frame_disco_prior or args.disco_prior_interval > 0
+    if use_disco_prior:
         if not args.disco_model_ckpt:
-            raise ValueError("--first_frame_disco_prior requires --disco_model_ckpt")
+            raise ValueError("DisCo prior requires --disco_model_ckpt")
         print(f"Loading DisCo model for first-frame prior: {args.disco_model_ckpt}")
         cl_model = DisCoLocModel.load_from_checkpoint(
             args.disco_model_ckpt, config=config, map_location=device
@@ -443,8 +465,9 @@ def evaluate_filtering():
         desdfs[scene] = np.load(
             desdf_file, allow_pickle=True
         ).item()
-        desdfs[scene]["desdf"][desdfs[scene]["desdf"] > 20] = 20
-        if args.first_frame_disco_prior:
+        if args.desdf_cap > 0:
+            desdfs[scene]["desdf"][desdfs[scene]["desdf"] > args.desdf_cap] = args.desdf_cap
+        if use_disco_prior:
             map_file = os.path.join(dataset_dir, scene, "map.png")
             scene_map = cv2.imread(map_file, cv2.IMREAD_GRAYSCALE)
             if scene_map is None:
@@ -457,6 +480,10 @@ def evaluate_filtering():
     success_3_all = []
     success_2_all = []
     RMSEs = []
+    keyframe_disco_checked = 0
+    keyframe_disco_applied = 0
+    keyframe_disco_skipped = 0
+    keyframe_entropy_values = []
     
     print("Starting Filtering Evaluation...")
     traj_len = args.traj_len
@@ -494,7 +521,7 @@ def evaluate_filtering():
             tqdm.tqdm.write(f"Evaluating Trajectory {traj_idx + 1}/{len(scene_trajs)}: {scene_name}[{chunk_start}:{chunk_start + chunk_len}]")
             
             desdf = desdfs[scene_name]
-            desdf_tensor = torch.tensor(desdf["desdf"], device=device)
+            desdf_tensor = torch.tensor(desdf["desdf"], dtype=torch.float32, device=device)
             
             # Reset prior for each trajectory chunk, as in the original f3loc eval.
             prior = torch.ones_like(desdf_tensor) / desdf_tensor.numel()
@@ -535,8 +562,12 @@ def evaluate_filtering():
                     # transit expect tensor
                     prior = transit(
                         prior, transition_meters, 
-                        sig_o=0.1, sig_x=0.1, sig_y=0.1, # Tighter noise for correct scale
-                        tsize=11, rsize=11, resolution=0.1
+                        sig_o=args.motion_sig_o,
+                        sig_x=args.motion_sig_x,
+                        sig_y=args.motion_sig_y,
+                        tsize=args.motion_tsize,
+                        rsize=args.motion_rsize,
+                        resolution=0.1,
                     ).to(device)
                 
                 # DEBUG: Force uniform prior to test Observation Model only
@@ -565,9 +596,9 @@ def evaluate_filtering():
                          # Assuming we have CPU/GPU tensor mix handling or pass return_np=False
                          
                          prob_vol, prob_dist_obs, orientations_obs, _ = localize_unloc(
-                            desdf_tensor.cpu(), pred_rays.cpu(), b_rays.cpu(), return_np=False
+                            desdf_tensor, pred_rays, b_rays, return_np=False
                          )
-                         likelihood = prob_vol.to(device)
+                         likelihood = prob_vol
                          
                     else:
                         # RRP
@@ -576,12 +607,34 @@ def evaluate_filtering():
                         pred_rays = torch.tensor(pred_rays, device=device)
                         
                         prob_vol, prob_dist_obs, orientations_obs, _ = localize(
-                            desdf_tensor.cpu(), pred_rays.cpu(), return_np=False
+                            desdf_tensor, pred_rays, return_np=False
                         )
-                        likelihood = prob_vol.to(device)
+                        likelihood = prob_vol
 
                 # Posterior Update
-                if args.first_frame_disco_prior and t == 0:
+                use_first_frame_disco = args.first_frame_disco_prior and t == 0
+                use_keyframe_disco = (
+                    args.disco_prior_interval > 0
+                    and t % args.disco_prior_interval == 0
+                    and not use_first_frame_disco
+                )
+
+                if use_keyframe_disco and args.disco_entropy_threshold is not None:
+                    base_posterior = prior * likelihood + 1e-15
+                    base_posterior = base_posterior / base_posterior.sum()
+                    keyframe_entropy = float(normalized_entropy(base_posterior).item())
+                    keyframe_entropy_values.append(keyframe_entropy)
+                    keyframe_disco_checked += 1
+                    use_keyframe_disco = keyframe_entropy >= args.disco_entropy_threshold
+                    if use_keyframe_disco:
+                        keyframe_disco_applied += 1
+                    else:
+                        keyframe_disco_skipped += 1
+                elif use_keyframe_disco:
+                    keyframe_disco_checked += 1
+                    keyframe_disco_applied += 1
+
+                if use_first_frame_disco or use_keyframe_disco:
                     crop_size_meters = data_config.get("local_map_crop_size_meters", 5.0)
                     disco_prior = build_first_frame_disco_prior(
                         cl_model=cl_model,
@@ -600,7 +653,12 @@ def evaluate_filtering():
                         device=device,
                     )
                     if disco_prior is not None:
-                        prior = disco_prior.to(device)
+                        disco_prior = disco_prior.to(device)
+                        if use_first_frame_disco:
+                            prior = disco_prior
+                        else:
+                            prior = prior * disco_prior + 1e-15
+                            prior = prior / prior.sum()
 
                 posterior = prior * likelihood + 1e-15
                 if posterior.sum() == 0:
@@ -642,6 +700,19 @@ def evaluate_filtering():
                     sample_acc03m=f"{np.mean(success_3_all):.3f}" if completed_samples else "n/a",
                     sample_acc02m=f"{np.mean(success_2_all):.3f}" if completed_samples else "n/a",
                 )
+                if keyframe_disco_checked:
+                    eval_pbar.set_postfix(
+                        scene=scene_name,
+                        traj=traj_idx + 1,
+                        frame=frame_offset,
+                        err_m=f"{error:.2f}",
+                        done_samples=completed_samples,
+                        sample_acc1m=f"{np.mean(success_10_all):.3f}" if completed_samples else "n/a",
+                        sample_acc05m=f"{np.mean(success_5_all):.3f}" if completed_samples else "n/a",
+                        sample_acc03m=f"{np.mean(success_3_all):.3f}" if completed_samples else "n/a",
+                        sample_acc02m=f"{np.mean(success_2_all):.3f}" if completed_samples else "n/a",
+                        disco_gate=f"{keyframe_disco_applied}/{keyframe_disco_checked}",
+                    )
                 eval_pbar.update(1)
                     
             if len(traj_errors) > 0:
@@ -689,6 +760,19 @@ def evaluate_filtering():
     print(f"0.2m Success Rate: {np.mean(success_2_all):.4f}")
     print(f"Mean RMSE succeeded: {RMSEs[success_10_all].mean():.4f}" if np.any(success_10_all) else "Mean RMSE succeeded: nan")
     print(f"Mean RMSE all: {RMSEs.mean():.4f}" if len(RMSEs) else "Mean RMSE all: nan")
+    if keyframe_disco_checked:
+        print(
+            f"Keyframe DisCo applied: {keyframe_disco_applied}/{keyframe_disco_checked} "
+            f"(skipped={keyframe_disco_skipped}, entropy_threshold={args.disco_entropy_threshold})"
+        )
+        if keyframe_entropy_values:
+            keyframe_entropy_values = np.array(keyframe_entropy_values)
+            print(
+                "Keyframe normalized entropy: "
+                f"mean={keyframe_entropy_values.mean():.4f}, "
+                f"min={keyframe_entropy_values.min():.4f}, "
+                f"max={keyframe_entropy_values.max():.4f}"
+            )
     print("="*30)
 
 if __name__ == "__main__":

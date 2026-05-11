@@ -66,10 +66,9 @@ datasets_s3d/
 You need the **Depth Anything V2** checkpoint (ViT-S version).
 
 * **Location**: `checkpoints/depth_anything_v2_vits.pth`
-* **Download**: Download the `depth_anything_v2_vits.pth` from  
-  https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth
+* **Download**: Download the `depth_anything_v2_vits.pth` from [**[HERE]**](https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth).
 
-If you need the **trained DisCo-FLoc checkpoints**, you can download them [here](https://drive.google.com/drive/folders/1NmdI9edHnXZbCO11bcKiTgt3bDg1y_c_?usp=sharing).
+If you need the **trained DisCo-FLoc checkpoints**, you can download them from [**[HERE]**](https://drive.google.com/drive/folders/1EbVorZNfjDQ6zmYISy_2Xy7rCLOmivXM?usp=sharing).
 
 ## Training
 ### Train DisCo Model

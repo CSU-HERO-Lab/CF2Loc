@@ -24,6 +24,13 @@ def localize(
         pred: (3, ) predicted state [x,y,theta], ndarray
     """
 
+    if not torch.is_tensor(desdf):
+        desdf = torch.tensor(desdf)
+    if not torch.is_tensor(rays):
+        rays = torch.tensor(rays)
+
+    rays = rays.to(device=desdf.device, dtype=desdf.dtype)
+
     # flip the ray, to make rotation direction mathematically positive
     rays = torch.flip(rays, [0])
     O = desdf.shape[2]
@@ -54,7 +61,7 @@ def localize(
     
     if pred_y.numel() == 0:
         # Handle case where no max is found (e.g., NaNs)
-        pred = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+        pred = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=desdf.device)
     else:
         # Take the first occurrence if multiple maxima exist
         pred_y = pred_y[0:1]
@@ -73,10 +80,10 @@ def localize(
         )
     else:
         return (
-            prob_vol.to(torch.float32).detach().cpu(),
-            prob_dist.to(torch.float32).detach().cpu(),
-            orientations.to(torch.float32).detach().cpu(),
-            pred.to(torch.float32).detach().cpu(),
+            prob_vol.to(torch.float32).detach(),
+            prob_dist.to(torch.float32).detach(),
+            orientations.to(torch.float32).detach(),
+            pred.to(torch.float32).detach(),
         )
 
 
@@ -177,6 +184,16 @@ def localize_unloc(
         pred: (3, ) 预测姿态 [x, y, theta]
     """
 
+    if not torch.is_tensor(desdf):
+        desdf = torch.tensor(desdf)
+    if not torch.is_tensor(d_hat):
+        d_hat = torch.tensor(d_hat)
+    if not torch.is_tensor(b_hat):
+        b_hat = torch.tensor(b_hat)
+
+    d_hat = d_hat.to(device=desdf.device, dtype=desdf.dtype)
+    b_hat = b_hat.to(device=desdf.device, dtype=desdf.dtype)
+
     # --- 1. 模仿原版的设置 ---
     
     # 翻转 d_hat 和 b_hat，使其与 desdf 的逆时针方向匹配
@@ -250,7 +267,9 @@ def localize_unloc(
     if pred_y_all.shape[0] == 0:
         # 如果所有概率都为 0 (下溢)，则返回一个默认值
         H, W, _ = desdf.shape
-        pred_y, pred_x, orn_idx = torch.tensor(H//2), torch.tensor(W//2), torch.tensor(0)
+        pred_y = torch.tensor(H // 2, device=desdf.device)
+        pred_x = torch.tensor(W // 2, device=desdf.device)
+        orn_idx = torch.tensor(0, device=desdf.device)
     else:
         pred_y = pred_y_all[0] # 取第一个匹配
         pred_x = pred_x_all[0] # 取第一个匹配
@@ -275,10 +294,10 @@ def localize_unloc(
         )
     else:
         return (
-            prob_vol.to(torch.float32).detach().cpu(),
-            prob_dist.to(torch.float32).detach().cpu(),
-            orientations.to(torch.float32).detach().cpu(),
-            pred.to(torch.float32).detach().cpu(),
+            prob_vol.to(torch.float32).detach(),
+            prob_dist.to(torch.float32).detach(),
+            orientations.to(torch.float32).detach(),
+            pred.to(torch.float32).detach(),
         )
         
 def get_ray_from_depth(d, V=11, dv=10, a0=None, F_W=3 / 8):
