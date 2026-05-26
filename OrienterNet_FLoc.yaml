@@ -1,0 +1,49 @@
+# OrienterNet-style dense pose likelihood training.
+project_name: "disco_model"
+run_name: "method1_orienternet_dense_stride8_v2"
+use_wandb: true
+gpu_ids: [0]
+epochs: 30
+batch_size: 24
+num_workers: 4
+log_every_n_steps: 10
+
+# Image observation encoder.
+dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
+image_encoder: "vits"
+freeze_image_backbone: true
+feature_dim: 128
+num_heads: 4
+image_token_grid: [6, 40]
+image_self_attn_layers: 1
+
+# Dense likelihood head.
+orienternet_map_output_stride: 8
+orienternet_map_input_mode: "gray_edges"
+orienternet_map_context_blocks: 2
+orienternet_map_feature_dim: 64
+orienternet_theta_bins: 36
+orienternet_kernel_size: 9
+orienternet_likelihood_loss: "ce_gaussian"
+orienternet_label_smoothing: 0.02
+orienternet_gaussian_loss_weight: 0.15
+orienternet_target_sigma_m: 0.35
+orienternet_target_theta_sigma_deg: 15.0
+
+# Optimizer.
+lr: 1.0e-4
+min_lr: 1.0e-5
+weight_decay: 1.0e-4
+
+datasets:
+  dataset_type: "s3d"
+  map_res: 0.02
+  data_folder: "datasets_s3d/Structured3D"
+  data_splits: "datasets_s3d/Structured3D/split.yaml"
+  val_split: "val"
+  floorplan_img_size: [256, 256]
+  local_map_crop_size_meters: 5.0
+  hard_negative:
+    mode: "none"
+  pose_aug:
+    enable: false

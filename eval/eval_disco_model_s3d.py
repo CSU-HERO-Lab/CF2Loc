@@ -14,6 +14,7 @@ from utils.localization_utils import *
 
 from training.RRP_lightning_module import RRPLightningModule
 from training.DisCo_lightning_module import DisCoLocModel
+from DisCo_model.pose_likelihood import refine_pose_likelihood
 
 # Global Args
 parser = argparse.ArgumentParser(description="Eval with DisCo Model")
@@ -86,6 +87,35 @@ parser.add_argument(
     dest="gpu_localize",
     action="store_false",
     help="Disable GPU DESDF localization and use the original CPU localize path.",
+)
+parser.add_argument(
+    "--orienternet_refine",
+    action="store_true",
+    help="Refine selected DisCo candidates with a small OrienterNet-style SE(2) likelihood grid.",
+)
+parser.add_argument(
+    "--refine_grid_t_m",
+    type=float,
+    default=0.1,
+    help="Translation radius in meters for the local SE(2) refinement grid. Uses {-r, 0, +r}.",
+)
+parser.add_argument(
+    "--refine_grid_theta_deg",
+    type=float,
+    default=5.0,
+    help="Angular radius in degrees for the local SE(2) refinement grid. Uses {-r, 0, +r}.",
+)
+parser.add_argument(
+    "--refine_top_m",
+    type=int,
+    default=1,
+    help="Number of top fused DisCo candidates to seed local refinement.",
+)
+parser.add_argument(
+    "--refine_mode",
+    choices=["softargmax", "argmax"],
+    default="softargmax",
+    help="Reducer used inside the selected local refinement likelihood grid.",
 )
 
 # Single Image Debugging
@@ -322,6 +352,8 @@ def evaluate():
     consolidated_pool_sizes = []
     consolidated_rep_sizes = []
     consolidated_basin_sizes = []
+    use_orienternet_refine = cl_model is not None and args.orienternet_refine
+    refine_grid_sizes = []
 
     # Create visualization directories
     if args.visualize:
@@ -351,6 +383,14 @@ def evaluate():
         "DESDF localize: "
         f"{'gpu_fast' if args.gpu_localize and device == 'cuda' else 'cpu_original'}"
     )
+    if args.orienternet_refine and cl_model is None:
+        print("OrienterNet-style refinement requested, but no DisCo checkpoint was provided; skipping refinement.")
+    elif use_orienternet_refine:
+        print(
+            "OrienterNet-style local refinement enabled "
+            f"(top_m={args.refine_top_m}, grid_t={args.refine_grid_t_m:.3f}m, "
+            f"grid_theta={args.refine_grid_theta_deg:.2f}deg, mode={args.refine_mode})"
+        )
     
     # Determine Loop Range
     if args.scene_name is not None and args.img_id is not None:
@@ -542,6 +582,43 @@ def evaluate():
                     final_orn_idx = orientations[final_y, final_x].item()
                     final_orn = (final_orn_idx / 36) * 2 * np.pi
                     pose_pred = np.array([final_x, final_y, final_orn])
+
+                    if (
+                        use_orienternet_refine
+                        and args.refine_top_m > 0
+                        and final_scores.numel() > 0
+                    ):
+                        refine_k = min(args.refine_top_m, final_scores.numel())
+                        refine_order = torch.topk(final_scores, k=refine_k).indices
+                        base_poses = []
+                        base_scores = []
+                        for score_idx in refine_order.detach().cpu().tolist():
+                            topk_pos = valid_indices[score_idx]
+                            base_y = topk_y[topk_pos].item()
+                            base_x = topk_x[topk_pos].item()
+                            base_orn_idx = orientations[base_y, base_x].item()
+                            base_theta = (base_orn_idx / 36) * 2 * np.pi
+                            base_poses.append([base_x, base_y, base_theta])
+                            base_scores.append(final_scores[score_idx].detach().cpu().item())
+
+                        refined = refine_pose_likelihood(
+                            cl_model,
+                            img_tokens,
+                            scene_map,
+                            base_poses,
+                            desdf_origin=(desdf_data["l"], desdf_data["t"]),
+                            desdf_stride=desdf_stride,
+                            map_res=map_res,
+                            crop_size_meters=crop_local_map_size,
+                            translation_radius_m=args.refine_grid_t_m,
+                            theta_radius_deg=args.refine_grid_theta_deg,
+                            base_scores=base_scores,
+                            score_scale=args.alpha,
+                            reduce=args.refine_mode,
+                            device=device,
+                        )
+                        pose_pred = refined["pose_desdf"]
+                        refine_grid_sizes.append(refined["num_grid_poses"])
             else:
                 # Fallback
                 pose_pred = np.array([geo_pred_x[0].item(), geo_pred_y[0].item(), 0.0])
@@ -565,6 +642,8 @@ def evaluate():
         postfix = {"1m_recall": f"{current_1m_recall:.4f}"}
         if use_consolidated_rerank and consolidated_rep_sizes:
             postfix["avg_rep_k"] = f"{(sum(consolidated_rep_sizes) / len(consolidated_rep_sizes)):.1f}"
+        if use_orienternet_refine and refine_grid_sizes:
+            postfix["avg_refine_grid"] = f"{(sum(refine_grid_sizes) / len(refine_grid_sizes)):.1f}"
         eval_pbar.set_postfix(postfix)
         
         # Compare (Critical changes crossing 1m threshold)
@@ -720,6 +799,14 @@ def evaluate():
         print(f"Results with DisCo (k={args.top_k}, alpha={args.alpha})")
     else:
         print(f"Results on S3D RRP-only (FOV={args.fov}, Net={args.net_type})")
+    if use_orienternet_refine:
+        avg_refine_grid = np.mean(refine_grid_sizes) if refine_grid_sizes else 0.0
+        print(
+            "OrienterNet-style refinement: "
+            f"top_m={args.refine_top_m}, grid_t={args.refine_grid_t_m:.3f}m, "
+            f"grid_theta={args.refine_grid_theta_deg:.2f}deg, mode={args.refine_mode}, "
+            f"avg_grid={avg_refine_grid:.1f}"
+        )
     print(f"1m recall = {np.sum(acc_record < 1) / total_samples:.4f}")
     print(f"0.5m recall = {np.sum(acc_record < 0.5) / total_samples:.4f}")
     print(f"0.1m recall = {np.sum(acc_record < 0.1) / total_samples:.4f}")
@@ -750,6 +837,7 @@ def evaluate():
         "cluster_source_top_k": args.cluster_source_top_k,
         "cluster_radius_m": args.cluster_radius_m,
         "gpu_localize": bool(args.gpu_localize and device == "cuda"),
+        "orienternet_refine": bool(use_orienternet_refine),
         "alpha": args.alpha,
         "1m_recall": np.sum(acc_record < 1) / total_samples,
         "0.5m_recall": np.sum(acc_record < 0.5) / total_samples,
@@ -768,6 +856,12 @@ def evaluate():
             current_result["se2_sigma_theta_deg"] = args.se2_sigma_theta_deg
             current_result["se2_angle_weight"] = args.se2_angle_weight
             current_result["se2_mode_radius"] = args.se2_mode_radius
+    if use_orienternet_refine:
+        current_result["refine_grid_t_m"] = args.refine_grid_t_m
+        current_result["refine_grid_theta_deg"] = args.refine_grid_theta_deg
+        current_result["refine_top_m"] = args.refine_top_m
+        current_result["refine_mode"] = args.refine_mode
+        current_result["avg_refine_grid"] = float(np.mean(refine_grid_sizes)) if refine_grid_sizes else 0.0
     
     # 2. Read Existing
     history = []

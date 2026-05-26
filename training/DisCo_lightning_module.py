@@ -9,6 +9,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from DisCo_model.image_patch_encoder import ImagePatchEncoder
 from DisCo_model.map_encoder import MapEncoder
+from DisCo_model.ray_attention_loss import (
+    build_ray_attention_targets,
+    ray_attention_kl_loss,
+)
 from DisCo_model.viz_utils import visualize_cross_modal_batch
 
 
@@ -27,6 +31,12 @@ class DisCoLocModel(pl.LightningModule):
         self.use_cls_global_fusion = bool(config.get("use_cls_global_fusion", False))
         self.use_cls_query_token = bool(config.get("use_cls_query_token", False))
         self.use_image_cls_token = self.use_cls_global_fusion or self.use_cls_query_token
+        self.enable_ray_attention_loss = bool(
+            config.get("enable_ray_attention_loss", False)
+        )
+        self.ray_attention_loss_weight = float(
+            config.get("ray_attention_loss_weight", 0.1)
+        )
 
         self.image_encoder = ImagePatchEncoder(
             encoder=config.get("image_encoder", "vits"),
@@ -180,12 +190,19 @@ class DisCoLocModel(pl.LightningModule):
         cls_token = cls_token.expand(batch_size, -1)
         return img_tokens, cls_token
 
-    def _score_encoded_pairs(self, img_tokens, map_tokens, cls_features=None, return_attn=False):
+    def _score_encoded_pairs(
+        self,
+        img_tokens,
+        map_tokens,
+        cls_features=None,
+        return_attn=False,
+        return_token_attn=False,
+    ):
         aligned_tokens, attn_weights = self.cross_attn(
             query=img_tokens,
             key=map_tokens,
             value=map_tokens,
-            need_weights=return_attn,
+            need_weights=return_attn or return_token_attn,
         )
         fused_tokens = self.cross_attn_norm(img_tokens + aligned_tokens)
 
@@ -198,10 +215,12 @@ class DisCoLocModel(pl.LightningModule):
             pooled = self.cls_pair_fusion(torch.cat([pooled, cls_features], dim=-1))
         scores = self.score_head(pooled).squeeze(-1)
 
-        if not return_attn:
+        if not (return_attn or return_token_attn):
             return scores
 
         map_attn = torch.einsum("bl,blm->bm", token_weights, attn_weights)
+        if return_token_attn:
+            return scores, map_attn, attn_weights
         return scores, map_attn
 
     def _pairwise_scores(self, image_features_all, map_tokens_all):
@@ -287,7 +306,7 @@ class DisCoLocModel(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        obs_img, pose, _, floorplan_img, wh, local_map, neg_local_map, neg_pose = batch
+        obs_img, pose, ray, floorplan_img, wh, local_map, neg_local_map, neg_pose = batch
         batch_size = obs_img.shape[0]
 
         img_tokens_all = self.encode_image(obs_img)
@@ -304,6 +323,36 @@ class DisCoLocModel(pl.LightningModule):
 
         targets = torch.arange(batch_size, device=self.device).long()
         loss = F.cross_entropy(logits_matrix, targets)
+        contrastive_loss = loss
+
+        if self.enable_ray_attention_loss and self.ray_attention_loss_weight > 0:
+            img_tokens_pos, cls_token_pos = self._split_image_features(img_tokens_all)
+            _, _, token_attn = self._score_encoded_pairs(
+                img_tokens_pos,
+                map_tokens_all[:batch_size],
+                cls_features=cls_token_pos,
+                return_attn=True,
+                return_token_attn=True,
+            )
+            ray_targets, ray_valid = build_ray_attention_targets(
+                ray=ray,
+                local_map=local_map,
+                num_image_tokens=token_attn.shape[1],
+                num_map_tokens=token_attn.shape[2],
+                image_token_grid=self.image_token_grid,
+                crop_size_meters=self.config["datasets"].get(
+                    "local_map_crop_size_meters", 5.0
+                ),
+                fov_degrees=self.config.get("ray_attention_fov_degrees", 80.0),
+                endpoint_sigma=self.config.get("ray_attention_endpoint_sigma", 0.08),
+                corridor_width=self.config.get("ray_attention_corridor_width", 0.045),
+                corridor_weight=self.config.get("ray_attention_corridor_weight", 0.35),
+                wall_weight=self.config.get("ray_attention_wall_weight", 0.25),
+            )
+            ray_attn_loss = ray_attention_kl_loss(token_attn, ray_targets, ray_valid)
+            loss = contrastive_loss + self.ray_attention_loss_weight * ray_attn_loss
+            self.log("train_contrastive_loss", contrastive_loss, prog_bar=False)
+            self.log("train_ray_attention_loss", ray_attn_loss, prog_bar=True)
 
         if self.trainer is not None and self.trainer.optimizers:
             current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
