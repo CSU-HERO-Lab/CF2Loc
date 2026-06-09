@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import ResNet18_Weights, resnet18
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -96,6 +97,77 @@ class ResidualConvBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.gelu(x + self.net(x))
+
+
+class ResNetFloorplanEncoder(nn.Module):
+    def __init__(
+        self,
+        feature_dim: int = 64,
+        input_mode: str = "gray_edges",
+        context_blocks: int = 1,
+        pretrained: bool = False,
+    ):
+        super().__init__()
+        if input_mode not in ("gray", "gray_edges"):
+            raise ValueError("input_mode must be one of {'gray', 'gray_edges'}.")
+
+        self.input_mode = input_mode
+        input_channels = 3 if input_mode == "gray_edges" else 1
+        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = resnet18(weights=weights)
+
+        if input_channels != 3:
+            original_conv = backbone.conv1
+            backbone.conv1 = nn.Conv2d(
+                input_channels,
+                original_conv.out_channels,
+                kernel_size=original_conv.kernel_size,
+                stride=original_conv.stride,
+                padding=original_conv.padding,
+                bias=False,
+            )
+            if pretrained:
+                with torch.no_grad():
+                    backbone.conv1.weight.copy_(
+                        original_conv.weight.mean(dim=1, keepdim=True)
+                    )
+
+        self.conv1 = backbone.conv1
+        self.bn1 = backbone.bn1
+        self.relu = backbone.relu
+        self.maxpool = backbone.maxpool
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.proj = nn.Conv2d(128, feature_dim, kernel_size=1, bias=False)
+        self.proj_norm = nn.GroupNorm(min(8, feature_dim), feature_dim)
+        self.context = nn.Sequential(
+            *[ResidualConvBlock(feature_dim) for _ in range(max(0, context_blocks))]
+        )
+
+        sobel_x = torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]
+        ).view(1, 1, 3, 3)
+        sobel_y = torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]
+        ).view(1, 1, 3, 3)
+        self.register_buffer("sobel_x", sobel_x, persistent=False)
+        self.register_buffer("sobel_y", sobel_y, persistent=False)
+
+    def forward(self, floorplan_img: torch.Tensor) -> torch.Tensor:
+        if floorplan_img.shape[1] == 3:
+            floorplan_img = floorplan_img.mean(dim=1, keepdim=True)
+        floorplan_img = floorplan_img.float()
+        if self.input_mode == "gray_edges":
+            grad_x = F.conv2d(floorplan_img, self.sobel_x, padding=1)
+            grad_y = F.conv2d(floorplan_img, self.sobel_y, padding=1)
+            floorplan_img = torch.cat([floorplan_img, grad_x, grad_y], dim=1)
+
+        features = self.relu(self.bn1(self.conv1(floorplan_img)))
+        features = self.maxpool(features)
+        features = self.layer1(features)
+        features = self.layer2(features)
+        features = F.gelu(self.proj_norm(self.proj(features)))
+        return self.context(features)
 
 
 class ObservationKernelEncoder(nn.Module):
@@ -214,12 +286,28 @@ class OrienterNetLikelihoodModel(pl.LightningModule):
             image_self_attn_layers=int(config.get("image_self_attn_layers", 1)),
             freeze_image_backbone=bool(config.get("freeze_image_backbone", True)),
         )
-        self.map_encoder = DenseFloorplanEncoder(
-            feature_dim=self.map_feature_dim,
-            output_stride=int(config.get("orienternet_map_output_stride", 8)),
-            input_mode=config.get("orienternet_map_input_mode", "gray"),
-            context_blocks=int(config.get("orienternet_map_context_blocks", 1)),
-        )
+        map_encoder_type = config.get("orienternet_map_encoder", "cnn").lower()
+        if map_encoder_type == "cnn":
+            self.map_encoder = DenseFloorplanEncoder(
+                feature_dim=self.map_feature_dim,
+                output_stride=int(config.get("orienternet_map_output_stride", 8)),
+                input_mode=config.get("orienternet_map_input_mode", "gray"),
+                context_blocks=int(config.get("orienternet_map_context_blocks", 1)),
+            )
+        elif map_encoder_type == "resnet18":
+            if int(config.get("orienternet_map_output_stride", 8)) != 8:
+                raise ValueError("ResNetFloorplanEncoder currently requires output stride 8.")
+            self.map_encoder = ResNetFloorplanEncoder(
+                feature_dim=self.map_feature_dim,
+                input_mode=config.get("orienternet_map_input_mode", "gray_edges"),
+                context_blocks=int(config.get("orienternet_map_context_blocks", 1)),
+                pretrained=bool(config.get("orienternet_map_pretrained", False)),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported orienternet_map_encoder '{map_encoder_type}'. "
+                "Expected one of: cnn, resnet18."
+            )
         self.map_score_bias = nn.Conv2d(self.map_feature_dim, 1, kernel_size=1)
         nn.init.zeros_(self.map_score_bias.weight)
         nn.init.zeros_(self.map_score_bias.bias)
