@@ -38,7 +38,7 @@ class DisCo_Dataset(Dataset):
         self.data = self._load_data(self.data_folder, self.data_split)
 
     def _default_map_res(self):
-        if self.dataset_type == "gibson" or "gibson" in self.data_folder.lower():
+        if self.dataset_type in ("gibson", "zind") or "gibson" in self.data_folder.lower():
             return 0.01
         return 0.02
 
@@ -80,6 +80,12 @@ class DisCo_Dataset(Dataset):
         elif self.dataset_type == "gibson":
             pose_in_meters = True
             pose_file = "poses.txt"
+            rgb_dir = "rgb"
+            map_res = 0.01
+        elif self.dataset_type == "zind":
+            # prepare_zind.py writes map-aligned pixel poses to a 1 cm/pixel map.
+            pose_in_meters = False
+            pose_file = "poses_map.txt"
             rgb_dir = "rgb"
             map_res = 0.01
         elif os.path.exists(os.path.join(scene_dir, "poses_map.txt")):
