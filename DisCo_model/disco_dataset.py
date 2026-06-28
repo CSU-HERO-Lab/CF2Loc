@@ -30,6 +30,16 @@ class DisCo_Dataset(Dataset):
         self.dataset_type = self.dataset_cfg.get("dataset_type", "auto").lower()
         self.map_res = float(self.dataset_cfg.get("map_res", self._default_map_res()))
         self.hard_negative_mode = self._get_hard_negative_mode()
+        self.floorplan_representation = self.dataset_cfg.get(
+            "floorplan_representation",
+            "rgb",
+        )
+        self.floorplan_wall_threshold = int(
+            self.dataset_cfg.get("floorplan_wall_threshold", 250)
+        )
+        self.floorplan_fill_wall_dilation = int(
+            self.dataset_cfg.get("floorplan_fill_wall_dilation", 1)
+        )
 
         with open(self.data_splits_path, "r", encoding="utf-8") as f:
             data_splits = yaml.safe_load(f)
@@ -174,14 +184,60 @@ class DisCo_Dataset(Dataset):
                 )
         return data
 
+    def _build_ternary_floorplan(self, gray_img):
+        wall = (gray_img < self.floorplan_wall_threshold).astype(np.uint8)
+        wall_for_fill = wall
+        if self.floorplan_fill_wall_dilation > 0:
+            kernel = np.ones((3, 3), dtype=np.uint8)
+            wall_for_fill = cv2.dilate(
+                wall,
+                kernel,
+                iterations=self.floorplan_fill_wall_dilation,
+            )
+
+        free_candidate = (wall_for_fill == 0).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(free_candidate, connectivity=4)
+        if num_labels <= 1:
+            outside = np.zeros_like(free_candidate, dtype=bool)
+        else:
+            border_labels = np.unique(
+                np.concatenate(
+                    [
+                        labels[0, :],
+                        labels[-1, :],
+                        labels[:, 0],
+                        labels[:, -1],
+                    ]
+                )
+            )
+            border_labels = border_labels[border_labels != 0]
+            outside = np.isin(labels, border_labels)
+
+        indoor_free = (free_candidate > 0) & ~outside
+        ternary = np.zeros_like(gray_img, dtype=np.float32)
+        ternary[wall_for_fill > 0] = 0.5
+        ternary[indoor_free] = 1.0
+        return ternary
+
     def _load_floorplan(self, floorplan_path):
         try:
             with Image.open(floorplan_path) as img:
+                if self.floorplan_representation == "gray_ternary":
+                    img = img.convert("L")
+                    img = img.resize(self.floorplan_img_size)
+                    gray = np.asarray(img, dtype=np.uint8)
+                    gray_float = gray.astype(np.float32) / 255.0
+                    ternary = self._build_ternary_floorplan(gray)
+                    stacked = np.stack([gray_float, ternary], axis=0)
+                    return torch.from_numpy(stacked).float()
+
                 img = img.convert("RGB")
                 img = img.resize(self.floorplan_img_size)
                 return transforms.ToTensor()(img)
         except Exception as e:
             print(f"Failed to load floorplan {floorplan_path}: {e}")
+            if self.floorplan_representation == "gray_ternary":
+                return torch.zeros((2, *self.floorplan_img_size))
             return torch.zeros((3, *self.floorplan_img_size))
 
     def __len__(self) -> int:
