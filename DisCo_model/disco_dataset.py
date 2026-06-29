@@ -40,12 +40,79 @@ class DisCo_Dataset(Dataset):
         self.floorplan_fill_wall_dilation = int(
             self.dataset_cfg.get("floorplan_fill_wall_dilation", 1)
         )
+        self.map_pose_rot_aug = self.dataset_cfg.get("map_pose_rot_aug", {})
+        self.map_pose_rot_aug_enable = bool(
+            self.map_pose_rot_aug.get("enable", False)
+        )
+        self.map_pose_rot_aug_p = float(self.map_pose_rot_aug.get("p", 0.0))
+        self.map_pose_rot_aug_angles = self._parse_rotation_angles(
+            self.map_pose_rot_aug.get("angles", [0, 90, 180, 270])
+        )
 
         with open(self.data_splits_path, "r", encoding="utf-8") as f:
             data_splits = yaml.safe_load(f)
 
         self.data_split = ["".join(x.split()) for x in data_splits[self.split]]
         self.data = self._load_data(self.data_folder, self.data_split)
+
+    @staticmethod
+    def _parse_rotation_angles(angles):
+        rotation_ks = []
+        for angle in angles:
+            angle = int(angle) % 360
+            if angle % 90 != 0:
+                raise ValueError(
+                    "map_pose_rot_aug angles must be multiples of 90 degrees."
+                )
+            rotation_ks.append((angle // 90) % 4)
+        if not rotation_ks:
+            rotation_ks = [0]
+        return rotation_ks
+
+    def _sample_map_pose_rotation(self):
+        if (
+            self.split != "train"
+            or not self.map_pose_rot_aug_enable
+            or self.map_pose_rot_aug_p <= 0.0
+            or np.random.rand() >= self.map_pose_rot_aug_p
+        ):
+            return 0
+        return int(np.random.choice(self.map_pose_rot_aug_angles))
+
+    @staticmethod
+    def _rotate_array_90(array, rotation_k):
+        rotation_k = int(rotation_k) % 4
+        if rotation_k == 0:
+            return array
+        return np.ascontiguousarray(np.rot90(array, k=rotation_k))
+
+    @staticmethod
+    def _rotate_pose_wh_90(pose, width, height, rotation_k):
+        rotation_k = int(rotation_k) % 4
+        pose = np.asarray(pose, dtype=np.float32).copy()
+        x, y, theta = pose
+        if rotation_k == 1:
+            pose[0] = y
+            pose[1] = width - 1.0 - x
+            pose[2] = theta - np.pi / 2.0
+            new_width, new_height = height, width
+        elif rotation_k == 2:
+            pose[0] = width - 1.0 - x
+            pose[1] = height - 1.0 - y
+            pose[2] = theta + np.pi
+            new_width, new_height = width, height
+        elif rotation_k == 3:
+            pose[0] = height - 1.0 - y
+            pose[1] = x
+            pose[2] = theta + np.pi / 2.0
+            new_width, new_height = height, width
+        else:
+            new_width, new_height = width, height
+
+        pose[0] = np.clip(pose[0], 0.0, max(float(new_width - 1), 0.0))
+        pose[1] = np.clip(pose[1], 0.0, max(float(new_height - 1), 0.0))
+        pose[2] = np.mod(pose[2], 2.0 * np.pi)
+        return pose, int(new_width), int(new_height)
 
     def _default_map_res(self):
         if self.dataset_type in ("gibson", "zind") or "gibson" in self.data_folder.lower():
@@ -219,11 +286,14 @@ class DisCo_Dataset(Dataset):
         ternary[indoor_free] = 1.0
         return ternary
 
-    def _load_floorplan(self, floorplan_path):
+    def _load_floorplan(self, floorplan_path, rotation_k=0):
         try:
             with Image.open(floorplan_path) as img:
                 if self.floorplan_representation == "gray_ternary":
                     img = img.convert("L")
+                    gray = np.asarray(img, dtype=np.uint8)
+                    gray = self._rotate_array_90(gray, rotation_k)
+                    img = Image.fromarray(gray, mode="L")
                     img = img.resize(self.floorplan_img_size)
                     gray = np.asarray(img, dtype=np.uint8)
                     gray_float = gray.astype(np.float32) / 255.0
@@ -232,6 +302,9 @@ class DisCo_Dataset(Dataset):
                     return torch.from_numpy(stacked).float()
 
                 img = img.convert("RGB")
+                rgb = np.asarray(img, dtype=np.uint8)
+                rgb = self._rotate_array_90(rgb, rotation_k)
+                img = Image.fromarray(rgb, mode="RGB")
                 img = img.resize(self.floorplan_img_size)
                 return transforms.ToTensor()(img)
         except Exception as e:
@@ -260,8 +333,17 @@ class DisCo_Dataset(Dataset):
         ray = torch.tensor(data["ray"])
 
         w, h = Image.open(data["floorplan_image"]).size
+        rotation_k = self._sample_map_pose_rotation()
+        if rotation_k != 0:
+            pose_np, w, h = self._rotate_pose_wh_90(
+                pose.numpy(),
+                w,
+                h,
+                rotation_k,
+            )
+            pose = torch.from_numpy(pose_np)
         wh_tensor = torch.tensor([w, h], dtype=torch.float32)
-        floorplan_img = self._load_floorplan(data["floorplan_image"])
+        floorplan_img = self._load_floorplan(data["floorplan_image"], rotation_k)
 
         raw_map = cv2.imread(data["floorplan_image"], 0)
         if raw_map is None:
@@ -270,6 +352,7 @@ class DisCo_Dataset(Dataset):
             neg_pose = torch.zeros(3, dtype=torch.float32)
             print(f"Warning: Failed to load floorplan image {data['floorplan_image']}.")
         else:
+            raw_map = self._rotate_array_90(raw_map, rotation_k)
             pose_aug = pose.numpy().copy()
             if self.split == "train" and self.pose_aug_params.get("enable", False):
                 trans_range = self.pose_aug_params.get("trans_range", 25)
