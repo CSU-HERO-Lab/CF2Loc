@@ -562,6 +562,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         metrics = {
             "1m_recall": (selected_xy_error <= 1.0).float().mean(),
             "0.5m_recall": (selected_xy_error <= 0.5).float().mean(),
+            "0.1m_recall": (selected_xy_error <= 0.1).float().mean(),
             "1m_30deg_recall": (
                 (selected_xy_error <= 1.0)
                 & (selected_theta_error <= math.radians(30.0))

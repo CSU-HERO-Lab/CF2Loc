@@ -23,11 +23,19 @@ class DenseFloorplanEncoder(nn.Module):
         super().__init__()
         if output_stride not in (2, 4, 8):
             raise ValueError("output_stride must be one of {2, 4, 8}.")
-        if input_mode not in ("gray", "gray_edges"):
-            raise ValueError("input_mode must be one of {'gray', 'gray_edges'}.")
+        if input_mode not in ("gray", "gray_edges", "rgb", "semantic_onehot"):
+            raise ValueError(
+                "input_mode must be one of "
+                "{'gray', 'gray_edges', 'rgb', 'semantic_onehot'}."
+            )
 
         self.input_mode = input_mode
-        self.input_channels = 3 if input_mode == "gray_edges" else 1
+        self.input_channels = {
+            "gray": 1,
+            "gray_edges": 3,
+            "rgb": 3,
+            "semantic_onehot": 5,
+        }[input_mode]
 
         stride_plan = {
             2: (2, 1, 1),
@@ -73,7 +81,10 @@ class DenseFloorplanEncoder(nn.Module):
         self.register_buffer("sobel_y", sobel_y, persistent=False)
 
     def forward(self, floorplan_img: torch.Tensor) -> torch.Tensor:
-        if floorplan_img.shape[1] == 3:
+        if (
+            self.input_mode not in ("rgb", "semantic_onehot")
+            and floorplan_img.shape[1] == 3
+        ):
             floorplan_img = floorplan_img.mean(dim=1, keepdim=True)
         floorplan_img = floorplan_img.float()
         if self.input_mode == "gray_edges":
@@ -108,9 +119,16 @@ class ResNetFloorplanEncoder(nn.Module):
         pretrained: bool = False,
     ):
         super().__init__()
-        if input_mode not in ("gray", "gray_edges", "gray_ternary"):
+        if input_mode not in (
+            "gray",
+            "gray_edges",
+            "gray_ternary",
+            "rgb",
+            "semantic_onehot",
+        ):
             raise ValueError(
-                "input_mode must be one of {'gray', 'gray_edges', 'gray_ternary'}."
+                "input_mode must be one of "
+                "{'gray', 'gray_edges', 'gray_ternary', 'rgb', 'semantic_onehot'}."
             )
 
         self.input_mode = input_mode
@@ -118,6 +136,8 @@ class ResNetFloorplanEncoder(nn.Module):
             "gray": 1,
             "gray_edges": 3,
             "gray_ternary": 2,
+            "rgb": 3,
+            "semantic_onehot": 5,
         }[input_mode]
         weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         backbone = resnet18(weights=weights)
@@ -160,7 +180,10 @@ class ResNetFloorplanEncoder(nn.Module):
         self.register_buffer("sobel_y", sobel_y, persistent=False)
 
     def forward(self, floorplan_img: torch.Tensor) -> torch.Tensor:
-        if self.input_mode != "gray_ternary" and floorplan_img.shape[1] == 3:
+        if (
+            self.input_mode not in ("gray_ternary", "rgb", "semantic_onehot")
+            and floorplan_img.shape[1] == 3
+        ):
             floorplan_img = floorplan_img.mean(dim=1, keepdim=True)
         floorplan_img = floorplan_img.float()
         if self.input_mode == "gray_edges":

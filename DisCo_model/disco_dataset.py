@@ -115,7 +115,10 @@ class DisCo_Dataset(Dataset):
         return pose, int(new_width), int(new_height)
 
     def _default_map_res(self):
-        if self.dataset_type in ("gibson", "zind") or "gibson" in self.data_folder.lower():
+        if (
+            self.dataset_type in ("gibson", "zind", "semrayloc", "clear_semrayloc")
+            or "gibson" in self.data_folder.lower()
+        ):
             return 0.01
         return 0.02
 
@@ -149,38 +152,65 @@ class DisCo_Dataset(Dataset):
         return mode
 
     def _scene_format(self, scene_dir):
+        pose_theta_sign = 1.0
         if self.dataset_type in ("s3d", "structured3d"):
             pose_in_meters = False
             pose_file = "poses_map.txt"
             rgb_dir = "imgs"
             map_res = 0.02
+            map_file = "map.png"
+            pose_meter_origin = "center"
         elif self.dataset_type == "gibson":
             pose_in_meters = True
             pose_file = "poses.txt"
             rgb_dir = "rgb"
             map_res = 0.01
+            map_file = "map.png"
+            pose_meter_origin = "center"
         elif self.dataset_type == "zind":
             # prepare_zind.py writes map-aligned pixel poses to a 1 cm/pixel map.
             pose_in_meters = False
             pose_file = "poses_map.txt"
             rgb_dir = "rgb"
             map_res = 0.01
+            map_file = "map.png"
+            pose_meter_origin = "center"
+        elif self.dataset_type in ("semrayloc", "clear_semrayloc"):
+            pose_in_meters = True
+            pose_file = "poses.txt"
+            rgb_dir = "rgb"
+            map_res = 0.01
+            map_file = "floorplan_semantic.png"
+            pose_meter_origin = "top_left"
+            pose_theta_sign = -1.0
         elif os.path.exists(os.path.join(scene_dir, "poses_map.txt")):
             pose_in_meters = False
             pose_file = "poses_map.txt"
             rgb_dir = "imgs"
             map_res = 0.02
+            map_file = "map.png"
+            pose_meter_origin = "center"
         else:
             pose_in_meters = True
             pose_file = "poses.txt"
             rgb_dir = "rgb"
             map_res = 0.01
+            map_file = "map.png"
+            pose_meter_origin = "center"
 
         return {
             "pose_file": self.dataset_cfg.get("pose_file", pose_file),
             "rgb_dir": self.dataset_cfg.get("rgb_dir", rgb_dir),
             "pose_in_meters": self.dataset_cfg.get("pose_in_meters", pose_in_meters),
             "map_res": float(self.dataset_cfg.get("map_res", map_res)),
+            "map_file": self.dataset_cfg.get("map_file", map_file),
+            "pose_meter_origin": self.dataset_cfg.get(
+                "pose_meter_origin", pose_meter_origin
+            ),
+            "pose_theta_sign": float(
+                self.dataset_cfg.get("pose_theta_sign", pose_theta_sign)
+            ),
+            "pose_theta_offset": float(self.dataset_cfg.get("pose_theta_offset", 0.0)),
         }
 
     @staticmethod
@@ -192,13 +222,34 @@ class DisCo_Dataset(Dataset):
         return (int(stem), 0)
 
     @staticmethod
-    def _convert_meter_poses_to_pixels(pose_data, map_path, map_res):
+    def _convert_meter_poses_to_pixels(
+        pose_data,
+        map_path,
+        map_res,
+        pose_meter_origin="center",
+    ):
         with Image.open(map_path) as map_img:
             map_w, map_h = map_img.size
 
+        pose_meter_origin = pose_meter_origin.lower()
+        if pose_meter_origin not in ("center", "top_left"):
+            raise ValueError(
+                "pose_meter_origin must be one of {'center', 'top_left'}, "
+                f"got '{pose_meter_origin}'."
+            )
+
         for pose in pose_data:
-            pose[0] = pose[0] / map_res + map_w / 2
-            pose[1] = pose[1] / map_res + map_h / 2
+            pose[0] = pose[0] / map_res
+            pose[1] = pose[1] / map_res
+            if pose_meter_origin == "center":
+                pose[0] += map_w / 2
+                pose[1] += map_h / 2
+        return pose_data
+
+    @staticmethod
+    def _convert_pose_theta(pose_data, theta_sign=1.0, theta_offset=0.0):
+        for pose in pose_data:
+            pose[2] = (theta_sign * pose[2] + theta_offset) % (2.0 * np.pi)
         return pose_data
 
     def _load_data(self, data_folder, data_split):
@@ -209,7 +260,7 @@ class DisCo_Dataset(Dataset):
                 continue
 
             scene_format = self._scene_format(cur_dir)
-            map_path = os.path.join(cur_dir, "map.png")
+            map_path = os.path.join(cur_dir, scene_format["map_file"])
             pose_path = os.path.join(cur_dir, scene_format["pose_file"])
             depth_path = os.path.join(cur_dir, self.dataset_cfg.get("depth_file", "depth40.txt"))
             rgb_dir = os.path.join(cur_dir, scene_format["rgb_dir"])
@@ -220,9 +271,21 @@ class DisCo_Dataset(Dataset):
                 if line.strip()
             ]
             if scene_format["pose_in_meters"]:
-                pose_data = self._convert_meter_poses_to_pixels(
-                    pose_data, map_path, scene_format["map_res"]
-                )
+                try:
+                    pose_data = self._convert_meter_poses_to_pixels(
+                        pose_data,
+                        map_path,
+                        scene_format["map_res"],
+                        scene_format["pose_meter_origin"],
+                    )
+                except Exception as e:
+                    print(f"Skipping scene {scene}: failed to read map {map_path}: {e}")
+                    continue
+            pose_data = self._convert_pose_theta(
+                pose_data,
+                scene_format["pose_theta_sign"],
+                scene_format["pose_theta_offset"],
+            )
 
             ray_data = [
                 list(map(float, line.split()))
@@ -286,9 +349,71 @@ class DisCo_Dataset(Dataset):
         ternary[indoor_free] = 1.0
         return ternary
 
+    @staticmethod
+    def _build_semantic_onehot_labels(rgb_img):
+        rgb = rgb_img.astype(np.int16)
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        max_gb = np.maximum(g, b)
+        max_rg = np.maximum(r, g)
+        mean = rgb.mean(axis=-1)
+
+        # Channel order after one-hot: free, wall, door/opening, window, other.
+        door = (r > 120) & ((r - max_gb) > 50)
+        window = (b > 120) & ((b - max_rg) > 50)
+        wall = (mean < 120) & ~door & ~window
+        free = (mean > 220) & ~door & ~window
+        other = ~(free | wall | door | window)
+
+        labels = np.zeros(rgb.shape[:2], dtype=np.uint8)
+        labels[wall] = 1
+        labels[door] = 2
+        labels[window] = 3
+        labels[other] = 4
+        return labels
+
+    @staticmethod
+    def _build_semantic_binary_floorplan(rgb_img):
+        rgb = rgb_img.astype(np.int16)
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        mean = rgb.mean(axis=-1)
+
+        door = (r > 150) & ((r - g) > 10) & ((r - b) > 10)
+        window = (b > 150) & ((b - r) > 10) & ((b - g) > 10)
+        free = door | ((mean > 180) & ~window)
+        binary = np.zeros(rgb.shape[:2], dtype=np.uint8)
+        binary[free] = 255
+        return binary
+
     def _load_floorplan(self, floorplan_path, rotation_k=0):
         try:
             with Image.open(floorplan_path) as img:
+                if self.floorplan_representation == "semantic_binary":
+                    img = img.convert("RGB")
+                    rgb = np.asarray(img, dtype=np.uint8)
+                    rgb = self._rotate_array_90(rgb, rotation_k)
+                    binary = self._build_semantic_binary_floorplan(rgb)
+                    img = Image.fromarray(binary, mode="L")
+                    img = img.resize(
+                        self.floorplan_img_size,
+                        resample=Image.Resampling.NEAREST,
+                    )
+                    binary = np.asarray(img, dtype=np.float32) / 255.0
+                    return torch.from_numpy(binary).float().unsqueeze(0)
+
+                if self.floorplan_representation == "semantic_onehot":
+                    img = img.convert("RGB")
+                    rgb = np.asarray(img, dtype=np.uint8)
+                    rgb = self._rotate_array_90(rgb, rotation_k)
+                    labels = self._build_semantic_onehot_labels(rgb)
+                    label_img = Image.fromarray(labels, mode="L")
+                    label_img = label_img.resize(
+                        self.floorplan_img_size,
+                        resample=Image.Resampling.NEAREST,
+                    )
+                    labels = np.asarray(label_img, dtype=np.int64)
+                    onehot = np.eye(5, dtype=np.float32)[labels]
+                    return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
+
                 if self.floorplan_representation == "gray_ternary":
                     img = img.convert("L")
                     gray = np.asarray(img, dtype=np.uint8)
@@ -311,6 +436,10 @@ class DisCo_Dataset(Dataset):
             print(f"Failed to load floorplan {floorplan_path}: {e}")
             if self.floorplan_representation == "gray_ternary":
                 return torch.zeros((2, *self.floorplan_img_size))
+            if self.floorplan_representation == "semantic_binary":
+                return torch.zeros((1, *self.floorplan_img_size))
+            if self.floorplan_representation == "semantic_onehot":
+                return torch.zeros((5, *self.floorplan_img_size))
             return torch.zeros((3, *self.floorplan_img_size))
 
     def __len__(self) -> int:
