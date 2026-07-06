@@ -102,6 +102,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")
+    parser.add_argument("--baseline_checkpoint_path")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as config_file:
@@ -112,4 +113,6 @@ if __name__ == "__main__":
         config["epochs"] = args.epochs
     if args.run_name:
         config["run_name"] = args.run_name
+    if args.baseline_checkpoint_path:
+        config["baseline_checkpoint_path"] = args.baseline_checkpoint_path
     main(config)

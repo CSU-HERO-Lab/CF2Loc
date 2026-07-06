@@ -17,6 +17,7 @@ from DisCo_model.pose_local_refiner import (
     PoseLocalRefinerLightning,
     apply_local_delta_to_pose,
     crop_local_map_np,
+    load_refiner_map_np,
     wrap_to_pi,
 )
 from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
@@ -184,9 +185,7 @@ def main():
         wh = wh.unsqueeze(0).to(device)
 
         item = dataset.data[index]
-        raw_map = cv2.imread(item["floorplan_image"], cv2.IMREAD_GRAYSCALE)
-        if raw_map is None:
-            raise FileNotFoundError(f"Failed to load floorplan {item['floorplan_image']}")
+        raw_map = load_refiner_map_np(dataset, item["floorplan_image"])
 
         map_tokens, map_coordinates, image_global = diffusion.condition_encoder(
             obs_img,

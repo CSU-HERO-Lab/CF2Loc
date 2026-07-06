@@ -100,6 +100,26 @@ def crop_local_map_np(
     return local_map
 
 
+def load_refiner_map_np(dataset: DisCo_Dataset, floorplan_path: str) -> np.ndarray:
+    representation = dataset.dataset_cfg.get(
+        "refiner_floorplan_representation",
+        dataset.floorplan_representation,
+    )
+    is_semantic_floorplan = (
+        dataset.dataset_type in ("semrayloc", "clear_semrayloc")
+        and Path(floorplan_path).name == "floorplan_semantic.png"
+    )
+    if representation in ("semantic_binary", "semantic_onehot") or is_semantic_floorplan:
+        with Image.open(floorplan_path) as map_img:
+            rgb = np.asarray(map_img.convert("RGB"), dtype=np.uint8)
+        return dataset._build_semantic_binary_floorplan(rgb)
+
+    raw_map = cv2.imread(floorplan_path, cv2.IMREAD_GRAYSCALE)
+    if raw_map is None:
+        raise FileNotFoundError(f"Failed to load floorplan {floorplan_path}")
+    return raw_map
+
+
 class PoseRefinerDataset(Dataset):
     def __init__(
         self,
@@ -206,9 +226,7 @@ class PoseRefinerDataset(Dataset):
                 rotation_k,
             )
 
-        raw_map = cv2.imread(data["floorplan_image"], cv2.IMREAD_GRAYSCALE)
-        if raw_map is None:
-            raise FileNotFoundError(f"Failed to load floorplan {data['floorplan_image']}")
+        raw_map = load_refiner_map_np(self.base_dataset, data["floorplan_image"])
         raw_map = self.base_dataset._rotate_array_90(raw_map, rotation_k)
 
         candidate_np = self._sample_candidate(pose_np, (width, height), rng)
