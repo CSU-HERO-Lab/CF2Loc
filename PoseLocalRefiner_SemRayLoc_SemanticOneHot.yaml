@@ -1,5 +1,5 @@
 project_name: "disco_model"
-run_name: "pose_local_refiner_semrayloc_semantic_binary"
+run_name: "pose_local_refiner_semrayloc_semantic_onehot"
 use_wandb: true
 gpu_ids: [0]
 epochs: 30
@@ -11,8 +11,8 @@ precision: "32-true"
 gradient_clip_val: 1.0
 num_sanity_val_steps: 1
 
-# Used to initialize the frozen observation image encoder. This can be
-# overridden with a semantic diffusion checkpoint once that run has checkpoints.
+# Used to initialize the frozen observation image encoder. Override this with
+# the matching semantic-onehot diffusion checkpoint for full semantic eval.
 baseline_checkpoint_path: "/home/ros/meng/DisCo-FLoc-map-pose-rot-aug-s3d/logs/pose_diffusion_runs/pose_query_diffusion_s3d_map_pose_rot_aug/checkpoints/epoch=27-val_1m_recall=0.678-val_best_of_64_1m_recall=0.929_20260629_154300.ckpt"
 
 # Frozen baseline image conditioning.
@@ -22,7 +22,7 @@ freeze_image_backbone: true
 image_token_grid: [6, 40]
 diffusion_feature_dim: 128
 diffusion_map_feature_dim: 64
-diffusion_map_input_mode: "gray_edges"
+diffusion_map_input_mode: "semantic_onehot"
 diffusion_map_context_blocks: 2
 diffusion_map_pretrained: false
 diffusion_image_layers: 1
@@ -43,6 +43,7 @@ diffusion_mode_sigma_deg: 20.0
 
 # Local pose refiner.
 refiner_feature_dim: 128
+refiner_map_input_mode: "semantic_onehot"
 refiner_crop_size_meters: 5.0
 refiner_crop_output_size: 256
 refiner_max_delta_m: 1.5
@@ -69,8 +70,8 @@ datasets:
   data_splits: "datasets_semrayloc/split.yaml"
   val_split: "val"
   floorplan_img_size: [256, 256]
-  floorplan_representation: "semantic_binary"
-  refiner_floorplan_representation: "semantic_binary"
+  floorplan_representation: "semantic_onehot"
+  refiner_floorplan_representation: "semantic_onehot"
   map_file: "floorplan_semantic.png"
   pose_file: "poses.txt"
   pose_in_meters: true

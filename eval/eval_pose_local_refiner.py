@@ -16,7 +16,7 @@ from DisCo_model.disco_dataset import DisCo_Dataset
 from DisCo_model.pose_local_refiner import (
     PoseLocalRefinerLightning,
     apply_local_delta_to_pose,
-    crop_local_map_np,
+    crop_to_refiner_tensor,
     load_refiner_map_np,
     wrap_to_pi,
 )
@@ -68,17 +68,25 @@ def build_results(diffusion_ckpt, refiner_ckpt, split, count, top_k, metrics):
     }
 
 
-def build_local_maps(raw_map, candidate_poses, crop_size_meters, map_res, output_size):
+def build_local_maps(
+    raw_map,
+    candidate_poses,
+    crop_size_meters,
+    map_res,
+    output_size,
+    representation,
+):
     local_maps = []
     for candidate_pose in candidate_poses.detach().cpu().numpy():
-        local_map = crop_local_map_np(
+        local_map = crop_to_refiner_tensor(
             raw_map,
             candidate_pose,
             crop_size_meters=crop_size_meters,
             map_res=map_res,
             output_size=output_size,
+            representation=representation,
         )
-        local_maps.append(torch.from_numpy(local_map).float().unsqueeze(0) / 255.0)
+        local_maps.append(local_map.float())
     return torch.stack(local_maps, dim=0)
 
 
@@ -92,6 +100,7 @@ def refine_candidates(
     crop_size_meters,
     crop_output_size,
     map_res,
+    representation,
     device,
 ):
     local_maps = build_local_maps(
@@ -100,6 +109,7 @@ def refine_candidates(
         crop_size_meters=crop_size_meters,
         map_res=map_res,
         output_size=crop_output_size,
+        representation=representation,
     ).to(device)
     obs_batch = obs_img.expand(candidate_poses.shape[0], -1, -1, -1)
     wh_batch = wh.expand(candidate_poses.shape[0], -1)
@@ -139,6 +149,10 @@ def main():
     dataset_cfg = config["datasets"]
     split = args.split or dataset_cfg.get("val_split", "val")
     map_res = float(dataset_cfg.get("map_res", 0.02))
+    refiner_floorplan_representation = dataset_cfg.get(
+        "refiner_floorplan_representation",
+        dataset_cfg.get("floorplan_representation", "rgb"),
+    )
     crop_size_meters = float(config.get("refiner_crop_size_meters", 5.0))
     crop_output_size = int(config.get("refiner_crop_output_size", 256))
 
@@ -213,6 +227,7 @@ def main():
             crop_size_meters,
             crop_output_size,
             map_res,
+            refiner_floorplan_representation,
             device,
         )
         update_metrics(
@@ -235,6 +250,7 @@ def main():
             crop_size_meters,
             crop_output_size,
             map_res,
+            refiner_floorplan_representation,
             device,
         )
         selected_idx = torch.argmax(top_scores)

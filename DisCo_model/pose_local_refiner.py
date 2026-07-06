@@ -63,7 +63,12 @@ def crop_local_map_np(
     crop_size_meters: float,
     map_res: float,
     output_size: int,
+    interpolation: int = cv2.INTER_LINEAR,
+    resize_interpolation: Optional[int] = None,
+    border_value=255,
 ) -> np.ndarray:
+    if resize_interpolation is None:
+        resize_interpolation = cv2.INTER_AREA
     x, y, theta = [float(v) for v in pose[:3]]
     crop_size_px = max(1, int(round(crop_size_meters / map_res)))
     pad = crop_size_px
@@ -74,7 +79,7 @@ def crop_local_map_np(
         pad,
         pad,
         cv2.BORDER_CONSTANT,
-        value=255,
+        value=border_value,
     )
 
     center = (x + pad, y + pad)
@@ -87,15 +92,15 @@ def crop_local_map_np(
         map_padded,
         rot_matrix,
         (crop_size_px, crop_size_px),
-        flags=cv2.INTER_LINEAR,
+        flags=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=255,
+        borderValue=border_value,
     )
     if crop_size_px != output_size:
         local_map = cv2.resize(
             local_map,
             (output_size, output_size),
-            interpolation=cv2.INTER_AREA,
+            interpolation=resize_interpolation,
         )
     return local_map
 
@@ -109,7 +114,14 @@ def load_refiner_map_np(dataset: DisCo_Dataset, floorplan_path: str) -> np.ndarr
         dataset.dataset_type in ("semrayloc", "clear_semrayloc")
         and Path(floorplan_path).name == "floorplan_semantic.png"
     )
-    if representation in ("semantic_binary", "semantic_onehot") or is_semantic_floorplan:
+    if representation == "semantic_onehot":
+        with Image.open(floorplan_path) as map_img:
+            rgb = np.asarray(map_img.convert("RGB"), dtype=np.uint8)
+        return dataset._build_semantic_onehot_labels(rgb)
+
+    if representation == "semantic_binary" or (
+        representation not in ("gray", "gray_edges") and is_semantic_floorplan
+    ):
         with Image.open(floorplan_path) as map_img:
             rgb = np.asarray(map_img.convert("RGB"), dtype=np.uint8)
         return dataset._build_semantic_binary_floorplan(rgb)
@@ -118,6 +130,39 @@ def load_refiner_map_np(dataset: DisCo_Dataset, floorplan_path: str) -> np.ndarr
     if raw_map is None:
         raise FileNotFoundError(f"Failed to load floorplan {floorplan_path}")
     return raw_map
+
+
+def crop_to_refiner_tensor(
+    refiner_map: np.ndarray,
+    pose: np.ndarray,
+    crop_size_meters: float,
+    map_res: float,
+    output_size: int,
+    representation: str,
+) -> torch.Tensor:
+    if representation == "semantic_onehot":
+        local_labels = crop_local_map_np(
+            refiner_map,
+            pose,
+            crop_size_meters=crop_size_meters,
+            map_res=map_res,
+            output_size=output_size,
+            interpolation=cv2.INTER_NEAREST,
+            resize_interpolation=cv2.INTER_NEAREST,
+            border_value=4,
+        ).astype(np.int64)
+        local_labels = np.clip(local_labels, 0, 4)
+        onehot = np.eye(5, dtype=np.float32)[local_labels]
+        return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
+
+    local_map_np = crop_local_map_np(
+        refiner_map,
+        pose,
+        crop_size_meters=crop_size_meters,
+        map_res=map_res,
+        output_size=output_size,
+    )
+    return torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
 
 
 class PoseRefinerDataset(Dataset):
@@ -146,6 +191,10 @@ class PoseRefinerDataset(Dataset):
         self.score_sigma_theta = math.radians(float(score_sigma_deg))
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
+        self.refiner_floorplan_representation = dataset_cfg.get(
+            "refiner_floorplan_representation",
+            dataset_cfg.get("floorplan_representation", "rgb"),
+        )
         self.base_dataset = DisCo_Dataset(
             data_folder=dataset_cfg["data_folder"],
             data_splits_path=dataset_cfg["data_splits"],
@@ -226,18 +275,18 @@ class PoseRefinerDataset(Dataset):
                 rotation_k,
             )
 
-        raw_map = load_refiner_map_np(self.base_dataset, data["floorplan_image"])
-        raw_map = self.base_dataset._rotate_array_90(raw_map, rotation_k)
+        refiner_map = load_refiner_map_np(self.base_dataset, data["floorplan_image"])
+        refiner_map = self.base_dataset._rotate_array_90(refiner_map, rotation_k)
 
         candidate_np = self._sample_candidate(pose_np, (width, height), rng)
-        local_map_np = crop_local_map_np(
-            raw_map,
+        local_map = crop_to_refiner_tensor(
+            refiner_map,
             candidate_np,
             crop_size_meters=self.crop_size_meters,
             map_res=self.map_res,
             output_size=self.crop_output_size,
+            representation=self.refiner_floorplan_representation,
         )
-        local_map = torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
 
         pose = torch.from_numpy(pose_np.astype(np.float32))
         candidate_pose = torch.from_numpy(candidate_np.astype(np.float32))
@@ -276,12 +325,22 @@ class PoseLocalRefiner(nn.Module):
         self.max_delta_theta = math.radians(float(config.get("refiner_max_delta_theta_deg", 45.0)))
         self.map_res = float(config["datasets"].get("map_res", 0.02))
         self.dropout = nn.Dropout(float(config.get("refiner_dropout", 0.1)))
-
-        diffusion = PoseQueryDiffusionLocalizer.load_from_checkpoint(
-            config["baseline_checkpoint_path"],
-            config=config,
-            map_location="cpu",
+        self.refiner_map_input_mode = config.get(
+            "refiner_map_input_mode",
+            config.get("diffusion_map_input_mode", "gray_edges"),
         )
+
+        diffusion = PoseQueryDiffusionLocalizer(config)
+        checkpoint = torch.load(config["baseline_checkpoint_path"], map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        image_state_dict = {
+            key: value
+            for key, value in state_dict.items()
+            if key.startswith("condition_encoder.image_encoder.")
+            or key.startswith("condition_encoder.image_norm.")
+            or key.startswith("condition_encoder.image_mixer.")
+        }
+        diffusion.load_state_dict(image_state_dict, strict=False)
         self.image_encoder = diffusion.condition_encoder.image_encoder
         self.image_norm = diffusion.condition_encoder.image_norm
         self.image_mixer = diffusion.condition_encoder.image_mixer
@@ -292,7 +351,7 @@ class PoseLocalRefiner(nn.Module):
 
         self.local_map_encoder = ResNetFloorplanEncoder(
             feature_dim=self.feature_dim,
-            input_mode="gray_edges",
+            input_mode=self.refiner_map_input_mode,
             context_blocks=int(config.get("refiner_map_context_blocks", 2)),
             pretrained=False,
         )
