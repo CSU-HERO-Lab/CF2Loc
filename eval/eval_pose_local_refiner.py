@@ -56,7 +56,7 @@ def summarize_metrics(store, prefix, count):
 
 
 def build_results(diffusion_ckpt, refiner_ckpt, split, count, top_k, metrics):
-    return {
+    result = {
         "diffusion_ckpt": diffusion_ckpt,
         "refiner_ckpt": refiner_ckpt,
         "split": split,
@@ -66,6 +66,59 @@ def build_results(diffusion_ckpt, refiner_ckpt, split, count, top_k, metrics):
         "selected_refined": summarize_metrics(metrics, "selected_refined", count),
         "topk_refined": summarize_metrics(metrics, "topk_refined", count),
     }
+    if "effective_top_k_sum" in metrics:
+        result["mean_effective_top_k"] = metrics["effective_top_k_sum"] / count
+    return result
+
+
+def choose_adaptive_top_k(
+    density: torch.Tensor,
+    max_top_k: int,
+    min_top_k: int,
+    mass: float,
+) -> int:
+    max_top_k = min(int(max_top_k), density.numel())
+    min_top_k = min(max(1, int(min_top_k)), max_top_k)
+    if max_top_k <= min_top_k:
+        return max_top_k
+    sorted_density = torch.sort(density, descending=True).values[:max_top_k]
+    weights = sorted_density.clamp_min(0.0)
+    if float(weights.sum().item()) <= 1e-8:
+        return max_top_k
+    cumulative = torch.cumsum(weights / weights.sum().clamp_min(1e-8), dim=0)
+    reached = torch.nonzero(cumulative >= float(mass), as_tuple=False)
+    if reached.numel() == 0:
+        return max_top_k
+    return max(min_top_k, int(reached[0, 0].item()) + 1)
+
+
+def expand_cached_image_tokens(
+    image_tokens: torch.Tensor,
+    count: int,
+) -> torch.Tensor:
+    if image_tokens.shape[0] == count:
+        return image_tokens
+    if image_tokens.shape[0] != 1:
+        raise ValueError(
+            f"Cannot expand cached image tokens with batch {image_tokens.shape[0]} "
+            f"to candidate count {count}"
+        )
+    return image_tokens.expand(count, -1, -1)
+
+
+def standardize(values: torch.Tensor) -> torch.Tensor:
+    if values.numel() <= 1:
+        return values * 0.0
+    return (values - values.mean()) / values.std(unbiased=False).clamp_min(1e-6)
+
+
+def weighted_pose_mean(poses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    weights = weights / weights.sum().clamp_min(1e-6)
+    xy = (poses[:, :2] * weights[:, None]).sum(dim=0)
+    sin_theta = (torch.sin(poses[:, 2]) * weights).sum()
+    cos_theta = (torch.cos(poses[:, 2]) * weights).sum()
+    theta = torch.atan2(sin_theta, cos_theta)
+    return torch.cat([xy, theta.view(1)], dim=0)
 
 
 def build_local_maps(
@@ -94,6 +147,7 @@ def build_local_maps(
 def refine_candidates(
     refiner,
     obs_img,
+    cached_image_tokens,
     raw_map,
     candidate_poses,
     wh,
@@ -102,31 +156,44 @@ def refine_candidates(
     map_res,
     representation,
     device,
+    refine_iters,
+    delta_scale,
 ):
-    local_maps = build_local_maps(
-        raw_map,
-        candidate_poses,
-        crop_size_meters=crop_size_meters,
-        map_res=map_res,
-        output_size=crop_output_size,
-        representation=representation,
-    ).to(device)
-    obs_batch = obs_img.expand(candidate_poses.shape[0], -1, -1, -1)
-    wh_batch = wh.expand(candidate_poses.shape[0], -1)
-    outputs = refiner(
-        obs_batch,
-        local_maps,
-        candidate_poses,
-        wh_batch,
-    )
-    refined = apply_local_delta_to_pose(
-        candidate_poses,
-        outputs["delta_xy_m"],
-        outputs["delta_theta"],
-        map_res=map_res,
-        wh=wh_batch,
-    )
-    return refined, outputs["score_logit"]
+    refined = candidate_poses
+    score_logit = None
+    for _ in range(max(1, int(refine_iters))):
+        local_maps = build_local_maps(
+            raw_map,
+            refined,
+            crop_size_meters=crop_size_meters,
+            map_res=map_res,
+            output_size=crop_output_size,
+            representation=representation,
+        ).to(device)
+        obs_batch = obs_img.expand(refined.shape[0], -1, -1, -1)
+        wh_batch = wh.expand(refined.shape[0], -1)
+        image_tokens_batch = None
+        if cached_image_tokens is not None:
+            image_tokens_batch = expand_cached_image_tokens(
+                cached_image_tokens,
+                refined.shape[0],
+            )
+        outputs = refiner(
+            obs_batch,
+            local_maps,
+            refined,
+            wh_batch,
+            image_tokens_batch,
+        )
+        refined = apply_local_delta_to_pose(
+            refined,
+            outputs["delta_xy_m"] * float(delta_scale),
+            outputs["delta_theta"] * float(delta_scale),
+            map_res=map_res,
+            wh=wh_batch,
+        )
+        score_logit = outputs["score_logit"]
+    return refined, score_logit
 
 
 def main():
@@ -139,12 +206,54 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--top_k", type=int, default=8)
+    parser.add_argument("--val_particles", type=int, default=None)
+    parser.add_argument("--sample_steps", type=int, default=None)
+    parser.add_argument("--mode_sigma_m", type=float, default=None)
+    parser.add_argument("--mode_sigma_deg", type=float, default=None)
+    parser.add_argument("--crop_size_meters", type=float, default=None)
+    parser.add_argument("--refine_iters", type=int, default=1)
+    parser.add_argument("--delta_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--cache_refiner_image",
+        action="store_true",
+        help="Encode the observation image once per sample and reuse it for all refiner candidates.",
+    )
+    parser.add_argument(
+        "--adaptive_top_k",
+        action="store_true",
+        help="Use density mass to reduce the number of top-k candidates refined per sample.",
+    )
+    parser.add_argument("--adaptive_min_top_k", type=int, default=4)
+    parser.add_argument("--adaptive_top_k_mass", type=float, default=0.9)
+    parser.add_argument(
+        "--topk_aggregate",
+        choices=("none", "mean", "score_mean", "density_mean", "mixed_mean"),
+        default="none",
+    )
+    parser.add_argument(
+        "--mixed_score_alpha",
+        type=float,
+        default=None,
+        help=(
+            "If set, choose the refined top-k pose with "
+            "zscore(diffusion_density)+alpha*zscore(refiner_score). "
+            "By default, keep the original refiner-score-only selection."
+        ),
+    )
     parser.add_argument("--log_every", type=int, default=0)
     parser.add_argument("--output_json")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
+    if args.val_particles is not None:
+        config["diffusion_val_particles"] = int(args.val_particles)
+    if args.sample_steps is not None:
+        config["diffusion_sample_steps"] = int(args.sample_steps)
+    if args.mode_sigma_m is not None:
+        config["diffusion_mode_sigma_m"] = float(args.mode_sigma_m)
+    if args.mode_sigma_deg is not None:
+        config["diffusion_mode_sigma_deg"] = float(args.mode_sigma_deg)
     diffusion_ckpt = args.diffusion_ckpt or config["baseline_checkpoint_path"]
     dataset_cfg = config["datasets"]
     split = args.split or dataset_cfg.get("val_split", "val")
@@ -153,7 +262,11 @@ def main():
         "refiner_floorplan_representation",
         dataset_cfg.get("floorplan_representation", "rgb"),
     )
-    crop_size_meters = float(config.get("refiner_crop_size_meters", 5.0))
+    crop_size_meters = float(
+        args.crop_size_meters
+        if args.crop_size_meters is not None
+        else config.get("refiner_crop_size_meters", 5.0)
+    )
     crop_output_size = int(config.get("refiner_crop_output_size", 256))
 
     torch.manual_seed(args.seed)
@@ -200,6 +313,9 @@ def main():
 
         item = dataset.data[index]
         raw_map = load_refiner_map_np(dataset, item["floorplan_image"])
+        cached_image_tokens = None
+        if args.cache_refiner_image:
+            cached_image_tokens = refiner.refiner.encode_image(obs_img)
 
         map_tokens, map_coordinates, image_global = diffusion.condition_encoder(
             obs_img,
@@ -221,6 +337,7 @@ def main():
         selected_refined, selected_score = refine_candidates(
             refiner,
             obs_img,
+            cached_image_tokens,
             raw_map,
             selected_pose.view(1, 3),
             wh,
@@ -229,6 +346,8 @@ def main():
             map_res,
             refiner_floorplan_representation,
             device,
+            args.refine_iters,
+            args.delta_scale,
         )
         update_metrics(
             metrics,
@@ -238,12 +357,23 @@ def main():
             map_res,
         )
 
-        top_k = min(int(args.top_k), pose_samples.shape[1])
+        max_top_k = min(int(args.top_k), pose_samples.shape[1])
+        if args.adaptive_top_k:
+            top_k = choose_adaptive_top_k(
+                density,
+                max_top_k=max_top_k,
+                min_top_k=args.adaptive_min_top_k,
+                mass=args.adaptive_top_k_mass,
+            )
+        else:
+            top_k = max_top_k
+        metrics["effective_top_k_sum"] = metrics.get("effective_top_k_sum", 0.0) + top_k
         top_indices = torch.topk(density, k=top_k).indices
         top_candidates = pose_samples[0, top_indices]
         top_refined, top_scores = refine_candidates(
             refiner,
             obs_img,
+            cached_image_tokens,
             raw_map,
             top_candidates,
             wh,
@@ -252,12 +382,42 @@ def main():
             map_res,
             refiner_floorplan_representation,
             device,
+            args.refine_iters,
+            args.delta_scale,
         )
-        selected_idx = torch.argmax(top_scores)
+        if args.mixed_score_alpha is None:
+            selection_scores = top_scores
+        else:
+            top_density = density[top_indices]
+            selection_scores = standardize(top_density) + float(
+                args.mixed_score_alpha
+            ) * standardize(top_scores)
+        if args.topk_aggregate == "none":
+            topk_pose = top_refined[torch.argmax(selection_scores)]
+        elif args.topk_aggregate == "mean":
+            topk_pose = weighted_pose_mean(
+                top_refined,
+                torch.ones_like(top_scores),
+            )
+        elif args.topk_aggregate == "score_mean":
+            topk_pose = weighted_pose_mean(
+                top_refined,
+                torch.softmax(top_scores, dim=0),
+            )
+        elif args.topk_aggregate == "density_mean":
+            topk_pose = weighted_pose_mean(
+                top_refined,
+                torch.softmax(density[top_indices], dim=0),
+            )
+        else:
+            topk_pose = weighted_pose_mean(
+                top_refined,
+                torch.softmax(selection_scores, dim=0),
+            )
         update_metrics(
             metrics,
             "topk_refined",
-            top_refined[selected_idx],
+            topk_pose,
             gt_pose,
             map_res,
         )

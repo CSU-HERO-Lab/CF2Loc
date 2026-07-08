@@ -463,8 +463,10 @@ class PoseLocalRefiner(nn.Module):
         local_map: torch.Tensor,
         candidate_pose: torch.Tensor,
         wh: torch.Tensor,
+        image_tokens: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        image_tokens = self.encode_image(obs_img)
+        if image_tokens is None:
+            image_tokens = self.encode_image(obs_img)
         map_tokens = self.encode_local_map(local_map)
         image_global = image_tokens.mean(dim=1)
         pose_features = self.encode_candidate_pose(candidate_pose, wh)
@@ -523,8 +525,9 @@ class PoseLocalRefinerLightning(pl.LightningModule):
         local_map: torch.Tensor,
         candidate_pose: torch.Tensor,
         wh: torch.Tensor,
+        image_tokens: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        return self.refiner(obs_img, local_map, candidate_pose, wh)
+        return self.refiner(obs_img, local_map, candidate_pose, wh, image_tokens)
 
     @staticmethod
     def _xy_error_m(pred_pose: torch.Tensor, target_pose: torch.Tensor, map_res: float):
