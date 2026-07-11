@@ -13,7 +13,7 @@ num_sanity_val_steps: 1
 
 # Used to initialize the frozen observation image encoder. Override this with
 # the matching semantic-onehot diffusion checkpoint for full semantic eval.
-baseline_checkpoint_path: "/home/ros/meng/DisCo-FLoc-map-pose-rot-aug-s3d/logs/pose_diffusion_runs/pose_query_diffusion_s3d_map_pose_rot_aug/checkpoints/epoch=27-val_1m_recall=0.678-val_best_of_64_1m_recall=0.929_20260629_154300.ckpt"
+baseline_checkpoint_path: "/home/ros/meng/DisCo-FLoc-p0-metric-coords/logs/pose_diffusion_runs/pose_query_diffusion_semrayloc_semantic_onehot_metric_coords/checkpoints/epoch=28-val_1m_recall=0.744-val_best_of_64_1m_recall=0.948_20260711_030112.ckpt"
 
 # Frozen baseline image conditioning.
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
@@ -30,6 +30,7 @@ diffusion_denoiser_layers: 2
 diffusion_num_heads: 4
 diffusion_dropout: 0.1
 diffusion_pose_fourier_bands: 4
+diffusion_coordinate_convention: "metric_cell_center_v1"
 
 # Baseline diffusion sampling used by eval.
 diffusion_train_steps: 1000
