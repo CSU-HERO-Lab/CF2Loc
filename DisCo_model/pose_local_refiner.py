@@ -503,6 +503,146 @@ class PoseLocalRefiner(nn.Module):
         }
 
 
+class DensePoseLocalRefiner(PoseLocalRefiner):
+    """Image-conditioned dense likelihood over a candidate-centered map crop."""
+
+    def __init__(self, config: dict):
+        super().__init__(config)
+        for module in (
+            self.image_attn,
+            self.image_attn_norm,
+            self.map_attn,
+            self.map_attn_norm,
+            self.ffn,
+            self.ffn_norm,
+            self.delta_head,
+            self.score_head,
+        ):
+            for parameter in module.parameters():
+                parameter.requires_grad = False
+        self.query_token.requires_grad = False
+        num_heads = int(config.get("refiner_num_heads", config.get("diffusion_num_heads", 4)))
+        dropout = float(config.get("refiner_dropout", 0.1))
+        self.crop_size_meters = float(config.get("refiner_crop_size_meters", 5.0))
+        self.dense_temperature = float(config.get("refiner_dense_temperature", 1.0))
+        self.dense_image_attn = nn.MultiheadAttention(
+            self.feature_dim,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.dense_image_attn_norm = nn.LayerNorm(self.feature_dim)
+        self.dense_ffn = nn.Sequential(
+            nn.Linear(self.feature_dim, self.feature_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.feature_dim * 2, self.feature_dim),
+        )
+        self.dense_ffn_norm = nn.LayerNorm(self.feature_dim)
+        self.heatmap_head = nn.Sequential(
+            nn.LayerNorm(self.feature_dim),
+            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.feature_dim // 2, 1),
+        )
+        self.theta_head = nn.Sequential(
+            nn.LayerNorm(self.feature_dim),
+            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.feature_dim // 2, 2),
+        )
+        self.dense_score_head = nn.Sequential(
+            nn.LayerNorm(self.feature_dim),
+            nn.Linear(self.feature_dim, self.feature_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.feature_dim // 2, 1),
+        )
+
+    @staticmethod
+    def build_dense_coordinates(
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        pos_x = ((torch.arange(width, device=device, dtype=dtype) + 0.5) / width) * 2.0 - 1.0
+        pos_y = ((torch.arange(height, device=device, dtype=dtype) + 0.5) / height) * 2.0 - 1.0
+        grid_y, grid_x = torch.meshgrid(pos_y, pos_x, indexing="ij")
+        return torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+
+    @staticmethod
+    def coordinates_to_local_m(
+        coordinates: torch.Tensor,
+        crop_size_meters: float,
+    ) -> torch.Tensor:
+        # Oriented crops place candidate-forward toward image-up and left toward image-right.
+        half_size = crop_size_meters * 0.5
+        return torch.stack(
+            [-coordinates[..., 1], coordinates[..., 0]], dim=-1
+        ) * half_size
+
+    def forward(
+        self,
+        obs_img: torch.Tensor,
+        local_map: torch.Tensor,
+        candidate_pose: torch.Tensor,
+        wh: torch.Tensor,
+        image_tokens: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if image_tokens is None:
+            image_tokens = self.encode_image(obs_img)
+        map_tokens = self.encode_local_map(local_map)
+        coordinates = self.build_dense_coordinates(
+            int(round(math.sqrt(map_tokens.shape[1]))),
+            int(round(math.sqrt(map_tokens.shape[1]))),
+            map_tokens.device,
+            map_tokens.dtype,
+        )
+        if coordinates.shape[0] != map_tokens.shape[1]:
+            raise ValueError("Dense refiner expects a square local-map token grid.")
+
+        image_global = image_tokens.mean(dim=1)
+        pose_features = self.encode_candidate_pose(candidate_pose, wh)
+        map_tokens = map_tokens + self.image_global_projection(image_global).unsqueeze(1)
+        map_tokens = map_tokens + self.pose_mlp(pose_features).unsqueeze(1)
+        attended, _ = self.dense_image_attn(
+            query=map_tokens,
+            key=image_tokens,
+            value=image_tokens,
+            need_weights=False,
+        )
+        fused_tokens = self.dense_image_attn_norm(
+            map_tokens + self.dropout(attended)
+        )
+        fused_tokens = self.dense_ffn_norm(
+            fused_tokens + self.dropout(self.dense_ffn(fused_tokens))
+        )
+
+        heatmap_logits = self.heatmap_head(fused_tokens).squeeze(-1)
+        heatmap_prob = F.softmax(
+            heatmap_logits / max(self.dense_temperature, 1e-6), dim=-1
+        )
+        local_coordinates_m = self.coordinates_to_local_m(
+            coordinates, self.crop_size_meters
+        )
+        delta_xy_m = torch.einsum("bn,nd->bd", heatmap_prob, local_coordinates_m)
+
+        theta_vectors = self.theta_head(fused_tokens)
+        theta_vector = torch.einsum("bn,bnd->bd", heatmap_prob, theta_vectors)
+        delta_theta = torch.atan2(theta_vector[:, 0], theta_vector[:, 1]).clamp(
+            -self.max_delta_theta, self.max_delta_theta
+        )
+        pooled_features = torch.einsum("bn,bnd->bd", heatmap_prob, fused_tokens)
+        score_logit = self.dense_score_head(pooled_features).squeeze(-1)
+        return {
+            "delta_xy_m": delta_xy_m,
+            "delta_theta": delta_theta,
+            "score_logit": score_logit,
+            "heatmap_logits": heatmap_logits,
+            "local_coordinates_m": local_coordinates_m,
+        }
+
+
 class PoseLocalRefinerLightning(pl.LightningModule):
     def __init__(self, config: dict):
         super().__init__()
@@ -512,7 +652,15 @@ class PoseLocalRefinerLightning(pl.LightningModule):
         self.delta_xy_weight = float(config.get("refiner_delta_xy_loss_weight", 1.0))
         self.delta_theta_weight = float(config.get("refiner_delta_theta_loss_weight", 1.0))
         self.score_weight = float(config.get("refiner_score_loss_weight", 0.25))
-        self.refiner = PoseLocalRefiner(config)
+        self.dense_heatmap_weight = float(config.get("refiner_dense_heatmap_loss_weight", 1.0))
+        self.dense_heatmap_sigma_m = float(config.get("refiner_dense_heatmap_sigma_m", 0.2))
+        refiner_arch = config.get("refiner_arch", "query_regression")
+        if refiner_arch == "query_regression":
+            self.refiner = PoseLocalRefiner(config)
+        elif refiner_arch == "dense_heatmap":
+            self.refiner = DensePoseLocalRefiner(config)
+        else:
+            raise ValueError(f"Unsupported refiner_arch: {refiner_arch}")
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -552,10 +700,26 @@ class PoseLocalRefinerLightning(pl.LightningModule):
             outputs["score_logit"],
             batch["score_target"],
         )
+        dense_heatmap_loss = outputs["delta_xy_m"].new_zeros(())
+        if "heatmap_logits" in outputs:
+            squared_distance = (
+                outputs["local_coordinates_m"].unsqueeze(0)
+                - batch["target_delta_xy_m"].unsqueeze(1)
+            ).square().sum(dim=-1)
+            target = torch.exp(
+                -0.5
+                * squared_distance
+                / max(self.dense_heatmap_sigma_m, 1e-6) ** 2
+            )
+            target = target / target.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+            dense_heatmap_loss = -(
+                target * F.log_softmax(outputs["heatmap_logits"], dim=-1)
+            ).sum(dim=-1).mean()
         loss = (
             self.delta_xy_weight * xy_loss
             + self.delta_theta_weight * theta_loss
             + self.score_weight * score_loss
+            + self.dense_heatmap_weight * dense_heatmap_loss
         )
 
         refined_pose = apply_local_delta_to_pose(
@@ -579,6 +743,7 @@ class PoseLocalRefinerLightning(pl.LightningModule):
             f"{stage}_delta_xy_loss": xy_loss,
             f"{stage}_delta_theta_loss": theta_loss,
             f"{stage}_score_loss": score_loss,
+            f"{stage}_dense_heatmap_loss": dense_heatmap_loss,
             f"{stage}_candidate_0.5m_recall": (candidate_xy_error <= 0.5).float().mean(),
             f"{stage}_candidate_1m_recall": (candidate_xy_error <= 1.0).float().mean(),
             f"{stage}_refined_0.1m_recall": (refined_xy_error <= 0.1).float().mean(),
