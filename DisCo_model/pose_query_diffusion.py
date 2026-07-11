@@ -12,6 +12,49 @@ from DisCo_model.image_patch_encoder import ImagePatchEncoder
 from DisCo_model.orienternet_likelihood import ResNetFloorplanEncoder
 
 
+LEGACY_COORDINATE_CONVENTION = "legacy_normalized_v0"
+METRIC_COORDINATE_CONVENTION = "metric_cell_center_v1"
+SUPPORTED_COORDINATE_CONVENTIONS = {
+    LEGACY_COORDINATE_CONVENTION,
+    METRIC_COORDINATE_CONVENTION,
+}
+
+
+def map_xy_to_normalized(xy: torch.Tensor, wh: torch.Tensor) -> torch.Tensor:
+    """Map continuous pixel coordinates to the normalized map extent.
+
+    Pose coordinates are measured from the top-left map boundary, so 0 and W/H
+    map to -1 and +1. Feature tokens use cell centers within the same extent.
+    """
+    wh = wh.to(device=xy.device, dtype=xy.dtype)
+    while wh.ndim < xy.ndim:
+        wh = wh.unsqueeze(1)
+    return xy / wh.clamp_min(1.0) * 2.0 - 1.0
+
+
+def normalized_to_map_xy(xy_norm: torch.Tensor, wh: torch.Tensor) -> torch.Tensor:
+    """Inverse of :func:`map_xy_to_normalized`."""
+    wh = wh.to(device=xy_norm.device, dtype=xy_norm.dtype)
+    while wh.ndim < xy_norm.ndim:
+        wh = wh.unsqueeze(1)
+    return (xy_norm + 1.0) * 0.5 * wh
+
+
+def build_cell_center_coordinates(
+    height: int,
+    width: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return normalized feature-cell centers in row-major order."""
+    pos_x = (torch.arange(width, device=device, dtype=dtype) + 0.5) / width
+    pos_y = (torch.arange(height, device=device, dtype=dtype) + 0.5) / height
+    pos_x = pos_x * 2.0 - 1.0
+    pos_y = pos_y * 2.0 - 1.0
+    grid_y, grid_x = torch.meshgrid(pos_y, pos_x, indexing="ij")
+    return torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+
+
 def cosine_beta_schedule(num_steps: int, s: float = 0.008) -> torch.Tensor:
     steps = torch.arange(num_steps + 1, dtype=torch.float64)
     alpha_bar = torch.cos(
@@ -54,6 +97,10 @@ class ImageConditionedMapEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.feature_dim = int(config.get("diffusion_feature_dim", 128))
+        self.coordinate_convention = config.get(
+            "diffusion_coordinate_convention",
+            LEGACY_COORDINATE_CONVENTION,
+        )
         self.image_token_grid = tuple(config.get("image_token_grid", [6, 40]))
         self.freeze_image_backbone = bool(config.get("freeze_image_backbone", True))
         num_heads = int(config.get("diffusion_num_heads", 4))
@@ -121,11 +168,18 @@ class ImageConditionedMapEncoder(nn.Module):
         width: int,
         device: torch.device,
         dtype: torch.dtype,
+        coordinate_convention: str = METRIC_COORDINATE_CONVENTION,
     ) -> torch.Tensor:
-        pos_x = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
-        pos_y = torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype)
-        grid_y, grid_x = torch.meshgrid(pos_y, pos_x, indexing="ij")
-        return torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+        if coordinate_convention == METRIC_COORDINATE_CONVENTION:
+            return build_cell_center_coordinates(height, width, device, dtype)
+        if coordinate_convention == LEGACY_COORDINATE_CONVENTION:
+            pos_x = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
+            pos_y = torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype)
+            grid_y, grid_x = torch.meshgrid(pos_y, pos_x, indexing="ij")
+            return torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+        raise ValueError(
+            f"Unsupported diffusion coordinate convention: {coordinate_convention!r}."
+        )
 
     def forward(
         self,
@@ -143,6 +197,7 @@ class ImageConditionedMapEncoder(nn.Module):
             width,
             map_tokens.device,
             map_tokens.dtype,
+            self.coordinate_convention,
         )
         map_tokens = map_tokens + self.map_pos_mlp(map_coordinates).unsqueeze(0)
         map_tokens = self.map_norm(map_tokens)
@@ -160,13 +215,28 @@ class ImageConditionedMapEncoder(nn.Module):
 
 
 class PoseMapCrossAttention(nn.Module):
-    def __init__(self, feature_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self,
+        feature_dim: int,
+        num_heads: int,
+        dropout: float,
+        metric_relative_max_m: float,
+        metric_relative_scale_m: float,
+        coordinate_convention: str,
+    ):
         super().__init__()
         if feature_dim % num_heads != 0:
             raise ValueError("feature_dim must be divisible by num_heads.")
         self.num_heads = num_heads
         self.head_dim = feature_dim // num_heads
         self.scale = self.head_dim**-0.5
+        self.metric_relative_max_m = float(metric_relative_max_m)
+        self.metric_relative_scale_m = float(metric_relative_scale_m)
+        self.coordinate_convention = coordinate_convention
+        if self.metric_relative_max_m <= 0:
+            raise ValueError("metric_relative_max_m must be positive.")
+        if self.metric_relative_scale_m <= 0:
+            raise ValueError("metric_relative_scale_m must be positive.")
         self.query = nn.Linear(feature_dim, feature_dim)
         self.key = nn.Linear(feature_dim, feature_dim)
         self.value = nn.Linear(feature_dim, feature_dim)
@@ -178,12 +248,62 @@ class PoseMapCrossAttention(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
+    @staticmethod
+    def build_metric_relative_features(
+        noisy_pose: torch.Tensor,
+        map_coordinates: torch.Tensor,
+        wh: torch.Tensor,
+        map_res,
+        max_distance_m: float,
+        scale_m: float,
+    ) -> torch.Tensor:
+        """Build clipped local-frame metric offsets with a fixed metric scale."""
+        batch_size, num_particles = noisy_pose.shape[:2]
+        num_map_tokens = map_coordinates.shape[0]
+        wh = wh.to(device=noisy_pose.device, dtype=noisy_pose.dtype)
+        map_res = torch.as_tensor(
+            map_res,
+            device=noisy_pose.device,
+            dtype=noisy_pose.dtype,
+        )
+        if map_res.ndim == 0:
+            map_res = map_res.expand(batch_size)
+        map_res = map_res.reshape(batch_size, 1, 1)
+
+        pose_xy = noisy_pose[..., :2]
+        angle_vec = F.normalize(noisy_pose[..., 2:4], dim=-1, eps=1e-6)
+        sin_theta = angle_vec[..., 0].unsqueeze(-1)
+        cos_theta = angle_vec[..., 1].unsqueeze(-1)
+        delta_norm = (
+            map_coordinates.view(1, 1, num_map_tokens, 2)
+            - pose_xy.unsqueeze(2)
+        )
+        delta_m = delta_norm * wh.view(batch_size, 1, 1, 2) * 0.5
+        delta_m = delta_m * map_res.unsqueeze(-1)
+        dx_m = delta_m[..., 0]
+        dy_m = delta_m[..., 1]
+        local_x_m = cos_theta * dx_m + sin_theta * dy_m
+        local_y_m = -sin_theta * dx_m + cos_theta * dy_m
+        distance_m = torch.sqrt(dx_m.square() + dy_m.square() + 1e-8)
+
+        clip = float(max_distance_m)
+        scale = float(scale_m)
+        local_x = local_x_m.clamp(-clip, clip) / scale
+        local_y = local_y_m.clamp(-clip, clip) / scale
+        distance = distance_m.clamp(0.0, clip) / scale
+        return torch.stack(
+            [local_x, local_y, distance, distance.square()],
+            dim=-1,
+        )
+
     def forward(
         self,
         pose_tokens: torch.Tensor,
         map_tokens: torch.Tensor,
         noisy_pose: torch.Tensor,
         map_coordinates: torch.Tensor,
+        wh: torch.Tensor,
+        map_res,
     ) -> torch.Tensor:
         batch_size, num_particles, feature_dim = pose_tokens.shape
         num_map_tokens = map_tokens.shape[1]
@@ -199,20 +319,32 @@ class PoseMapCrossAttention(nn.Module):
         )
         attention = torch.einsum("bmhd,bnhd->bhmn", query, key) * self.scale
 
-        pose_xy = noisy_pose[..., :2]
-        angle_vec = F.normalize(noisy_pose[..., 2:4], dim=-1, eps=1e-6)
-        sin_theta = angle_vec[..., 0].unsqueeze(-1)
-        cos_theta = angle_vec[..., 1].unsqueeze(-1)
-        delta = map_coordinates.view(1, 1, num_map_tokens, 2) - pose_xy.unsqueeze(2)
-        dx = delta[..., 0]
-        dy = delta[..., 1]
-        local_x = cos_theta * dx + sin_theta * dy
-        local_y = -sin_theta * dx + cos_theta * dy
-        distance = torch.sqrt(dx.square() + dy.square() + 1e-8)
-        relative_features = torch.stack(
-            [local_x, local_y, distance, distance.square()],
-            dim=-1,
-        )
+        if self.coordinate_convention == METRIC_COORDINATE_CONVENTION:
+            relative_features = self.build_metric_relative_features(
+                noisy_pose,
+                map_coordinates,
+                wh,
+                map_res,
+                self.metric_relative_max_m,
+                self.metric_relative_scale_m,
+            )
+        else:
+            pose_xy = noisy_pose[..., :2]
+            angle_vec = F.normalize(noisy_pose[..., 2:4], dim=-1, eps=1e-6)
+            sin_theta = angle_vec[..., 0].unsqueeze(-1)
+            cos_theta = angle_vec[..., 1].unsqueeze(-1)
+            delta = (
+                map_coordinates.view(1, 1, num_map_tokens, 2)
+                - pose_xy.unsqueeze(2)
+            )
+            dx = delta[..., 0]
+            dy = delta[..., 1]
+            local_x = cos_theta * dx + sin_theta * dy
+            local_y = -sin_theta * dx + cos_theta * dy
+            distance = torch.sqrt(dx.square() + dy.square() + 1e-8)
+            relative_features = torch.stack(
+                [local_x, local_y, distance, distance.square()], dim=-1
+            )
         relative_bias = self.relative_bias(relative_features).permute(0, 3, 1, 2)
         attention = torch.softmax(attention + relative_bias, dim=-1)
         attention = self.dropout(attention)
@@ -223,9 +355,24 @@ class PoseMapCrossAttention(nn.Module):
 
 
 class PoseDenoiserBlock(nn.Module):
-    def __init__(self, feature_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self,
+        feature_dim: int,
+        num_heads: int,
+        dropout: float,
+        metric_relative_max_m: float,
+        metric_relative_scale_m: float,
+        coordinate_convention: str,
+    ):
         super().__init__()
-        self.cross_attn = PoseMapCrossAttention(feature_dim, num_heads, dropout)
+        self.cross_attn = PoseMapCrossAttention(
+            feature_dim,
+            num_heads,
+            dropout,
+            metric_relative_max_m,
+            metric_relative_scale_m,
+            coordinate_convention,
+        )
         self.cross_norm = nn.LayerNorm(feature_dim)
         self.ffn = nn.Sequential(
             nn.Linear(feature_dim, feature_dim * 4),
@@ -242,12 +389,16 @@ class PoseDenoiserBlock(nn.Module):
         map_tokens: torch.Tensor,
         noisy_pose: torch.Tensor,
         map_coordinates: torch.Tensor,
+        wh: torch.Tensor,
+        map_res,
     ) -> torch.Tensor:
         attended = self.cross_attn(
             pose_tokens,
             map_tokens,
             noisy_pose,
             map_coordinates,
+            wh,
+            map_res,
         )
         pose_tokens = self.cross_norm(pose_tokens + self.dropout(attended))
         return self.ffn_norm(pose_tokens + self.dropout(self.ffn(pose_tokens)))
@@ -267,12 +418,25 @@ class PoseQueryDenoiser(nn.Module):
         )
         self.time_embedding = SinusoidalTimeEmbedding(self.feature_dim)
         self.image_global_projection = nn.Linear(self.feature_dim, self.feature_dim)
+        metric_relative_max_m = float(
+            config.get("diffusion_metric_relative_max_m", 20.0)
+        )
+        metric_relative_scale_m = float(
+            config.get("diffusion_metric_relative_scale_m", 5.0)
+        )
+        coordinate_convention = config.get(
+            "diffusion_coordinate_convention",
+            LEGACY_COORDINATE_CONVENTION,
+        )
         self.blocks = nn.ModuleList(
             [
                 PoseDenoiserBlock(
                     feature_dim=self.feature_dim,
                     num_heads=int(config.get("diffusion_num_heads", 4)),
                     dropout=float(config.get("diffusion_dropout", 0.1)),
+                    metric_relative_max_m=metric_relative_max_m,
+                    metric_relative_scale_m=metric_relative_scale_m,
+                    coordinate_convention=coordinate_convention,
                 )
                 for _ in range(int(config.get("diffusion_denoiser_layers", 2)))
             ]
@@ -300,6 +464,8 @@ class PoseQueryDenoiser(nn.Module):
         map_tokens: torch.Tensor,
         map_coordinates: torch.Tensor,
         image_global: torch.Tensor,
+        wh: torch.Tensor,
+        map_res,
     ) -> torch.Tensor:
         pose_tokens = self.pose_mlp(self.fourier_encode(noisy_pose))
         pose_tokens = pose_tokens + self.time_embedding(timesteps)
@@ -310,6 +476,8 @@ class PoseQueryDenoiser(nn.Module):
                 map_tokens,
                 noisy_pose,
                 map_coordinates,
+                wh,
+                map_res,
             )
         return self.output(pose_tokens)
 
@@ -319,6 +487,15 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(config)
         self.config = config
+        self.coordinate_convention = config.get(
+            "diffusion_coordinate_convention",
+            LEGACY_COORDINATE_CONVENTION,
+        )
+        if self.coordinate_convention not in SUPPORTED_COORDINATE_CONVENTIONS:
+            raise ValueError(
+                "Unsupported diffusion coordinate convention: "
+                f"{self.coordinate_convention!r}."
+            )
         self.map_res = float(config["datasets"].get("map_res", 0.02))
         self.num_train_steps = int(config.get("diffusion_train_steps", 1000))
         self.train_particles = int(config.get("diffusion_train_particles", 8))
@@ -360,15 +537,13 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         return torch.cat([xy, angle], dim=-1)
 
     def encode_pose(self, pose: torch.Tensor, wh: torch.Tensor) -> torch.Tensor:
-        xy = pose[:, :2] / wh.clamp_min(1.0)
-        xy = xy * 2.0 - 1.0
+        xy = map_xy_to_normalized(pose[:, :2], wh)
         angle = torch.stack([torch.sin(pose[:, 2]), torch.cos(pose[:, 2])], dim=-1)
         return torch.cat([xy, angle], dim=-1)
 
     def decode_pose(self, pose_state: torch.Tensor, wh: torch.Tensor) -> torch.Tensor:
         pose_state = self.constrain_clean_pose(pose_state)
-        xy = (pose_state[..., :2] + 1.0) * 0.5
-        xy = xy * wh.unsqueeze(1)
+        xy = normalized_to_map_xy(pose_state[..., :2], wh)
         theta = torch.remainder(
             torch.atan2(pose_state[..., 2], pose_state[..., 3]),
             2 * math.pi,
@@ -425,6 +600,8 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
             map_tokens,
             map_coordinates,
             image_global,
+            wh,
+            self.map_res,
         )
 
         xy_noise_loss = F.mse_loss(predicted_noise[..., :2], noise[..., :2])
@@ -497,6 +674,8 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
                 map_tokens,
                 map_coordinates,
                 image_global,
+                wh,
+                self.map_res,
             )
             clean_pose = self.predict_clean_pose(state, timesteps, predicted_noise)
             if step_idx == len(timestep_values) - 1:
@@ -511,6 +690,20 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
             )
 
         return self.decode_pose(state, wh)
+
+    def on_load_checkpoint(self, checkpoint: Dict) -> None:
+        checkpoint_hparams = checkpoint.get("hyper_parameters", {})
+        loaded_convention = checkpoint_hparams.get(
+            "diffusion_coordinate_convention",
+            LEGACY_COORDINATE_CONVENTION,
+        )
+        if loaded_convention != self.coordinate_convention:
+            raise RuntimeError(
+                "This checkpoint uses an incompatible pose/map coordinate "
+                "convention. Metric cell-center models must be trained from "
+                "scratch (expected diffusion_coordinate_convention="
+                f"{self.coordinate_convention!r}, got {loaded_convention!r})."
+            )
 
     def select_pose_mode(
         self,
