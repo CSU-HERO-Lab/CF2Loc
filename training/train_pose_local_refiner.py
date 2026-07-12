@@ -32,7 +32,7 @@ def build_dataset(config: dict, split: str, deterministic: bool):
     )
 
 
-def main(config):
+def main(config, ckpt_path=None):
     num_workers = int(config.get("num_workers", 4))
     train_dataset = build_dataset(config, split="train", deterministic=False)
     val_dataset = build_dataset(
@@ -93,7 +93,7 @@ def main(config):
         limit_val_batches=config.get("limit_val_batches", None),
         num_sanity_val_steps=int(config.get("num_sanity_val_steps", 1)),
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
 
 if __name__ == "__main__":
@@ -103,6 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")
     parser.add_argument("--baseline_checkpoint_path")
+    parser.add_argument("--ckpt_path")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as config_file:
@@ -115,4 +116,4 @@ if __name__ == "__main__":
         config["run_name"] = args.run_name
     if args.baseline_checkpoint_path:
         config["baseline_checkpoint_path"] = args.baseline_checkpoint_path
-    main(config)
+    main(config, ckpt_path=args.ckpt_path)
