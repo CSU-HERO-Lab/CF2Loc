@@ -63,6 +63,7 @@ def crop_local_map_np(
     crop_size_meters: float,
     map_res: float,
     output_size: int,
+    oriented: bool = True,
     interpolation: int = cv2.INTER_LINEAR,
     resize_interpolation: Optional[int] = None,
     border_value=255,
@@ -83,8 +84,8 @@ def crop_local_map_np(
     )
 
     center = (x + pad, y + pad)
-    angle_deg = np.degrees(theta)
-    rot_matrix = cv2.getRotationMatrix2D(center, angle_deg + 90.0, 1.0)
+    angle_deg = np.degrees(theta) + 90.0 if oriented else 0.0
+    rot_matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
     rot_matrix[0, 2] += (crop_size_px / 2.0) - center[0]
     rot_matrix[1, 2] += (crop_size_px / 2.0) - center[1]
 
@@ -139,6 +140,7 @@ def crop_to_refiner_tensor(
     map_res: float,
     output_size: int,
     representation: str,
+    oriented: bool = True,
 ) -> torch.Tensor:
     if representation == "semantic_onehot":
         local_labels = crop_local_map_np(
@@ -147,6 +149,7 @@ def crop_to_refiner_tensor(
             crop_size_meters=crop_size_meters,
             map_res=map_res,
             output_size=output_size,
+            oriented=oriented,
             interpolation=cv2.INTER_NEAREST,
             resize_interpolation=cv2.INTER_NEAREST,
             border_value=4,
@@ -161,6 +164,7 @@ def crop_to_refiner_tensor(
         crop_size_meters=crop_size_meters,
         map_res=map_res,
         output_size=output_size,
+        oriented=oriented,
     )
     return torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
 
@@ -195,6 +199,7 @@ class PoseRefinerDataset(Dataset):
             "refiner_floorplan_representation",
             dataset_cfg.get("floorplan_representation", "rgb"),
         )
+        self.refiner_oriented_crop = bool(dataset_cfg.get("refiner_oriented_crop", True))
         self.base_dataset = DisCo_Dataset(
             data_folder=dataset_cfg["data_folder"],
             data_splits_path=dataset_cfg["data_splits"],
@@ -286,6 +291,7 @@ class PoseRefinerDataset(Dataset):
             map_res=self.map_res,
             output_size=self.crop_output_size,
             representation=self.refiner_floorplan_representation,
+            oriented=self.refiner_oriented_crop,
         )
 
         pose = torch.from_numpy(pose_np.astype(np.float32))
