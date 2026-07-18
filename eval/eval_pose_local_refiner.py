@@ -205,7 +205,16 @@ def main():
     parser.add_argument("--subset_fraction", type=float, default=1.0)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--top_k", type=int, default=8)
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=1,
+        help=(
+            "Number of KDE-ranked candidates to refine. The default refines only "
+            "the KDE mode; values greater than one enable the slower candidate "
+            "quality reranking ablation."
+        ),
+    )
     parser.add_argument("--val_particles", type=int, default=None)
     parser.add_argument("--sample_steps", type=int, default=None)
     parser.add_argument("--mode_sigma_m", type=float, default=None)
@@ -243,6 +252,8 @@ def main():
     parser.add_argument("--log_every", type=int, default=0)
     parser.add_argument("--output_json")
     args = parser.parse_args()
+    if args.top_k < 1:
+        parser.error("--top_k must be at least 1")
 
     with open(args.config, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
@@ -358,62 +369,68 @@ def main():
         )
 
         max_top_k = min(int(args.top_k), pose_samples.shape[1])
-        if args.adaptive_top_k:
-            top_k = choose_adaptive_top_k(
-                density,
-                max_top_k=max_top_k,
-                min_top_k=args.adaptive_min_top_k,
-                mass=args.adaptive_top_k_mass,
-            )
+        if max_top_k == 1:
+            # The KDE-selected pose is already the highest-density particle.
+            # Reuse its refinement instead of cropping and encoding it twice.
+            top_k = 1
+            topk_pose = selected_refined[0]
         else:
-            top_k = max_top_k
+            if args.adaptive_top_k:
+                top_k = choose_adaptive_top_k(
+                    density,
+                    max_top_k=max_top_k,
+                    min_top_k=args.adaptive_min_top_k,
+                    mass=args.adaptive_top_k_mass,
+                )
+            else:
+                top_k = max_top_k
+            top_indices = torch.topk(density, k=top_k).indices
+            top_candidates = pose_samples[0, top_indices]
+            top_refined, top_scores = refine_candidates(
+                refiner,
+                obs_img,
+                cached_image_tokens,
+                raw_map,
+                top_candidates,
+                wh,
+                crop_size_meters,
+                crop_output_size,
+                map_res,
+                refiner_floorplan_representation,
+                device,
+                args.refine_iters,
+                args.delta_scale,
+            )
+            if args.mixed_score_alpha is None:
+                selection_scores = top_scores
+            else:
+                top_density = density[top_indices]
+                selection_scores = standardize(top_density) + float(
+                    args.mixed_score_alpha
+                ) * standardize(top_scores)
+            if args.topk_aggregate == "none":
+                topk_pose = top_refined[torch.argmax(selection_scores)]
+            elif args.topk_aggregate == "mean":
+                topk_pose = weighted_pose_mean(
+                    top_refined,
+                    torch.ones_like(top_scores),
+                )
+            elif args.topk_aggregate == "score_mean":
+                topk_pose = weighted_pose_mean(
+                    top_refined,
+                    torch.softmax(top_scores, dim=0),
+                )
+            elif args.topk_aggregate == "density_mean":
+                topk_pose = weighted_pose_mean(
+                    top_refined,
+                    torch.softmax(density[top_indices], dim=0),
+                )
+            else:
+                topk_pose = weighted_pose_mean(
+                    top_refined,
+                    torch.softmax(selection_scores, dim=0),
+                )
         metrics["effective_top_k_sum"] = metrics.get("effective_top_k_sum", 0.0) + top_k
-        top_indices = torch.topk(density, k=top_k).indices
-        top_candidates = pose_samples[0, top_indices]
-        top_refined, top_scores = refine_candidates(
-            refiner,
-            obs_img,
-            cached_image_tokens,
-            raw_map,
-            top_candidates,
-            wh,
-            crop_size_meters,
-            crop_output_size,
-            map_res,
-            refiner_floorplan_representation,
-            device,
-            args.refine_iters,
-            args.delta_scale,
-        )
-        if args.mixed_score_alpha is None:
-            selection_scores = top_scores
-        else:
-            top_density = density[top_indices]
-            selection_scores = standardize(top_density) + float(
-                args.mixed_score_alpha
-            ) * standardize(top_scores)
-        if args.topk_aggregate == "none":
-            topk_pose = top_refined[torch.argmax(selection_scores)]
-        elif args.topk_aggregate == "mean":
-            topk_pose = weighted_pose_mean(
-                top_refined,
-                torch.ones_like(top_scores),
-            )
-        elif args.topk_aggregate == "score_mean":
-            topk_pose = weighted_pose_mean(
-                top_refined,
-                torch.softmax(top_scores, dim=0),
-            )
-        elif args.topk_aggregate == "density_mean":
-            topk_pose = weighted_pose_mean(
-                top_refined,
-                torch.softmax(density[top_indices], dim=0),
-            )
-        else:
-            topk_pose = weighted_pose_mean(
-                top_refined,
-                torch.softmax(selection_scores, dim=0),
-            )
         update_metrics(
             metrics,
             "topk_refined",
