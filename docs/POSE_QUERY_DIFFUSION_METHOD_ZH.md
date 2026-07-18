@@ -73,7 +73,7 @@ ZInD 转换脚本为 [`scripts/prepare_zind.py`](../scripts/prepare_zind.py)。�
 flowchart LR
   I["RGB query I"] --> IE["Frozen Depth-Anything ViT-S\n6x40 image tokens"]
   IE --> IM["1-layer image token mixer"]
-  M["Floorplan map M"] --> ME["Gray + Sobel\nResNet18 map encoder"]
+  M["Floorplan map M"] --> ME["Grayscale\nResNet18 map encoder"]
   ME --> MP["32x32 map tokens\n+ 2D position"]
   IM --> F["Map queries attend to image tokens"]
   MP --> F
@@ -103,7 +103,7 @@ flowchart LR
 
 ### 5.2 平面图分支
 
-输入地图先转为灰度，再拼接 Sobel \(x/y\) 边缘，形成三通道输入。使用未预训练的 ResNet-18 前半部分：`conv1 -> maxpool -> layer1 -> layer2`，对 \(256\times256\) 输入输出 \(32\times32\) 的 64 维 feature map。经 \(1\times1\) 投影后，得到 \(N_M=1024\) 个 128 维 map token。
+非语义地图直接转为单通道灰度图，不额外计算 Sobel 通道。使用未预训练的 ResNet-18 前半部分：`conv1 -> maxpool -> layer1 -> layer2`，对 \(256\times256\) 输入输出 \(32\times32\) 的 64 维 feature map。经 \(1\times1\) 投影后，得到 \(N_M=1024\) 个 128 维 map token。
 
 每个 token 具有归一化二维坐标 \(c_j\in[-1,1]^2\)，通过 MLP 编码后加到 token 上。随后以 map token 为 query、image token 为 key/value 做一次 4-head cross-attention，并接一个残差 FFN：
 
@@ -123,7 +123,7 @@ T_M\leftarrow\mathrm{FFN}(\mathrm{LN}(T_M+\mathrm{Attn}(T_M,T_I,T_I))).
 z_0=\left[2x/W_M-1,\;2y/H_M-1,\;\sin\theta,\;\cos\theta\right].
 \]
 
-位置限制在 \([-1,1]\)，角度二元向量在每次 clean-pose 估计后归一化。解码时用 `atan2(sin, cos)` 恢复 \(\theta\)。
+位置限制在 \([-1,1]\)，角度二元向量在每次 \(z_0\) 估计后归一化。解码时用 `atan2(sin, cos)` 恢复 \(\theta\)。
 
 ### 6.2 前向扩散
 
@@ -157,7 +157,7 @@ q_y=-\sin\theta_i\Delta_x+\cos\theta_i\Delta_y.
 
 ## 7. 训练目标
 
-网络以 noise prediction 为主目标：
+网络只使用标准的 noise-prediction 目标：
 
 \[
 \mathcal{L}_{noise}=
@@ -165,21 +165,7 @@ q_y=-\sin\theta_i\Delta_x+\cos\theta_i\Delta_y.
 \lambda_\theta\mathrm{MSE}(\hat\epsilon_{ang},\epsilon_{ang}).
 \]
 
-此外，从 \(z_t\) 与 \(\hat\epsilon\) 重建 clean pose \(\hat z_0\)，使用位置 Smooth-L1 和角度 cosine loss：
-
-\[
-\mathcal{L}_{clean}=
-\mathrm{SmoothL1}(\hat z_{0,xy},z_{0,xy})+
-\lambda_\theta(1-\langle\hat z_{0,ang},z_{0,ang}\rangle).
-\]
-
-总损失为：
-
-\[
-\mathcal{L}=\mathcal{L}_{noise}+0.1\mathcal{L}_{clean},
-\]
-
-其中 \(\lambda_\theta=1\)。
+其中 \(\lambda_\theta=1\)，总损失即 \(\mathcal{L}=\mathcal{L}_{noise}\)。实验表明，额外的重建位姿回归会与多模态噪声预测目标产生干扰，因此主方法不再使用该辅助项。
 
 ## 8. 推理与 mode 选择
 
@@ -246,7 +232,7 @@ checkpoint 按 `val_1m_recall` 保存，mode 为 `max`。
 1. 当前 baseline 不使用 `depth40.txt`，因此不能表述为显式 depth/ray-guided localization。
 2. ZInD 训练视角为四个固定 yaw，尚未实现 SemRayLoc 风格的 online continuous random-yaw augmentation。
 3. validation sampling 尚未固定随机 generator；跨 epoch 的数值虽在大验证集上较稳定，严格消融时仍应固定采样种子。
-4. 当前 map 输入仅为 wall structure 和 Sobel edge，不使用房间语义、门窗语义或文本标签。
+4. 非语义模型的 map 输入仅为单通道灰度 wall structure，不使用 Sobel、房间语义、门窗语义或文本标签。
 5. 模型生成完整 pose distribution；高 best-of-64 而低 mode recall 表明候选覆盖不等同于最终定位正确，需要分别分析 denoiser 条件性与 mode-selection 策略。
 
 ## 13. 复现命令
@@ -263,5 +249,5 @@ cd /home/ros/meng/DisCo-FLoc-s3d-zind
 
 # S3D-base architecture trained on ZInD
 .venv/bin/python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_ZInD_S3DBase.yaml
+  --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```

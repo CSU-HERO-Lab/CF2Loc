@@ -8,7 +8,7 @@ import torch
 import yaml
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,7 +16,28 @@ from DisCo_model.disco_dataset import DisCo_Dataset
 from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
 
 
-def main(config):
+def build_validation_subset(dataset, dataset_cfg):
+    fraction = float(dataset_cfg.get("val_subset_fraction", 1.0))
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("datasets.val_subset_fraction must be in (0, 1].")
+    if fraction >= 1.0:
+        return dataset
+
+    subset_size = max(1, int(round(len(dataset) * fraction)))
+    generator = torch.Generator().manual_seed(
+        int(dataset_cfg.get("val_subset_seed", 42))
+    )
+    indices = torch.randperm(len(dataset), generator=generator)[:subset_size]
+    indices = indices.sort().values.tolist()
+    print(
+        f"Using fixed validation subset: {subset_size}/{len(dataset)} "
+        f"samples ({fraction:.1%})."
+    )
+    return Subset(dataset, indices)
+
+
+def main(config, ckpt_path=None):
+    pl.seed_everything(int(config.get("seed", 42)), workers=True)
     dataset_cfg = config["datasets"]
     floorplan_size = tuple(dataset_cfg["floorplan_img_size"])
     num_workers = int(config.get("num_workers", 4))
@@ -38,6 +59,7 @@ def main(config):
         pose_aug_params=None,
         dataset_cfg=dataset_cfg,
     )
+    val_dataset = build_validation_subset(val_dataset, dataset_cfg)
 
     train_loader = DataLoader(
         train_dataset,
@@ -74,6 +96,7 @@ def main(config):
         "{val_best_of_64_1m_recall:.3f}_"
         + timestamp,
         save_top_k=3,
+        save_last=True,
         monitor="val_1m_recall",
         mode="max",
     )
@@ -91,7 +114,7 @@ def main(config):
         limit_val_batches=config.get("limit_val_batches", None),
         num_sanity_val_steps=int(config.get("num_sanity_val_steps", 1)),
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
 
 if __name__ == "__main__":
@@ -100,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")
+    parser.add_argument("--ckpt_path")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as config_file:
@@ -110,4 +134,4 @@ if __name__ == "__main__":
         config["epochs"] = args.epochs
     if args.run_name:
         config["run_name"] = args.run_name
-    main(config)
+    main(config, ckpt_path=args.ckpt_path)

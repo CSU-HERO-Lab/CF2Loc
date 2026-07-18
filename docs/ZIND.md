@@ -35,5 +35,5 @@ Then train with:
 
 ```bash
 .venv/bin/python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_ZInD_S3DBase.yaml
+  --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```

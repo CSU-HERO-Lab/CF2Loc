@@ -55,13 +55,22 @@ def summarize_metrics(store, prefix, count):
     }
 
 
-def build_results(diffusion_ckpt, refiner_ckpt, split, count, top_k, metrics):
+def build_results(
+    diffusion_ckpt,
+    refiner_ckpt,
+    split,
+    count,
+    top_k,
+    pose_selection,
+    metrics,
+):
     result = {
         "diffusion_ckpt": diffusion_ckpt,
         "refiner_ckpt": refiner_ckpt,
         "split": split,
         "samples": count,
         "top_k": int(top_k),
+        "pose_selection": pose_selection,
         "baseline": summarize_metrics(metrics, "baseline", count),
         "selected_refined": summarize_metrics(metrics, "selected_refined", count),
         "topk_refined": summarize_metrics(metrics, "topk_refined", count),
@@ -121,6 +130,20 @@ def weighted_pose_mean(poses: torch.Tensor, weights: torch.Tensor) -> torch.Tens
     return torch.cat([xy, theta.view(1)], dim=0)
 
 
+def pose_sample_mean(pose_samples: torch.Tensor) -> torch.Tensor:
+    weights = torch.ones(
+        pose_samples.shape[:2],
+        device=pose_samples.device,
+        dtype=pose_samples.dtype,
+    )
+    weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    xy = (pose_samples[..., :2] * weights[..., None]).sum(dim=1)
+    sin_theta = (torch.sin(pose_samples[..., 2]) * weights).sum(dim=1)
+    cos_theta = (torch.cos(pose_samples[..., 2]) * weights).sum(dim=1)
+    theta = torch.atan2(sin_theta, cos_theta)
+    return torch.cat([xy, theta.unsqueeze(-1)], dim=-1)
+
+
 def build_local_maps(
     raw_map,
     candidate_poses,
@@ -128,6 +151,7 @@ def build_local_maps(
     map_res,
     output_size,
     representation,
+    oriented,
 ):
     local_maps = []
     for candidate_pose in candidate_poses.detach().cpu().numpy():
@@ -138,6 +162,7 @@ def build_local_maps(
             map_res=map_res,
             output_size=output_size,
             representation=representation,
+            oriented=oriented,
         )
         local_maps.append(local_map.float())
     return torch.stack(local_maps, dim=0)
@@ -155,6 +180,7 @@ def refine_candidates(
     crop_output_size,
     map_res,
     representation,
+    oriented,
     device,
     refine_iters,
     delta_scale,
@@ -169,6 +195,7 @@ def refine_candidates(
             map_res=map_res,
             output_size=crop_output_size,
             representation=representation,
+            oriented=oriented,
         ).to(device)
         obs_batch = obs_img.expand(refined.shape[0], -1, -1, -1)
         wh_batch = wh.expand(refined.shape[0], -1)
@@ -198,10 +225,10 @@ def refine_candidates(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Baseline.yaml")
+    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--diffusion_ckpt")
     parser.add_argument("--refiner_ckpt", required=True)
-    parser.add_argument("--split", default=None)
+    parser.add_argument("--split", choices=("val", "test"), required=True)
     parser.add_argument("--subset_fraction", type=float, default=1.0)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -214,6 +241,12 @@ def main():
             "the KDE mode; values greater than one enable the slower candidate "
             "quality reranking ablation."
         ),
+    )
+    parser.add_argument(
+        "--pose_selection",
+        choices=("kde", "mean"),
+        default="kde",
+        help="How to select the coarse pose from diffusion particles before local refinement.",
     )
     parser.add_argument("--val_particles", type=int, default=None)
     parser.add_argument("--sample_steps", type=int, default=None)
@@ -266,8 +299,9 @@ def main():
     if args.mode_sigma_deg is not None:
         config["diffusion_mode_sigma_deg"] = float(args.mode_sigma_deg)
     diffusion_ckpt = args.diffusion_ckpt or config["baseline_checkpoint_path"]
+    config["baseline_checkpoint_path"] = diffusion_ckpt
     dataset_cfg = config["datasets"]
-    split = args.split or dataset_cfg.get("val_split", "val")
+    split = args.split
     map_res = float(dataset_cfg.get("map_res", 0.02))
     refiner_floorplan_representation = dataset_cfg.get(
         "refiner_floorplan_representation",
@@ -279,6 +313,7 @@ def main():
         else config.get("refiner_crop_size_meters", 5.0)
     )
     crop_output_size = int(config.get("refiner_crop_output_size", 256))
+    refiner_oriented_crop = bool(dataset_cfg.get("refiner_oriented_crop", True))
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -302,7 +337,6 @@ def main():
 
     diffusion = PoseQueryDiffusionLocalizer.load_from_checkpoint(
         diffusion_ckpt,
-        config=config,
         map_location="cpu",
     ).to(device)
     diffusion.eval()
@@ -341,6 +375,8 @@ def main():
             num_steps=int(config.get("diffusion_sample_steps", 20)),
         )
         selected_pose, density = diffusion.select_pose_mode(pose_samples)
+        if args.pose_selection == "mean":
+            selected_pose = pose_sample_mean(pose_samples)
         selected_pose = selected_pose[0]
         density = density[0]
         update_metrics(metrics, "baseline", selected_pose, gt_pose, map_res)
@@ -356,6 +392,7 @@ def main():
             crop_output_size,
             map_res,
             refiner_floorplan_representation,
+            refiner_oriented_crop,
             device,
             args.refine_iters,
             args.delta_scale,
@@ -369,7 +406,7 @@ def main():
         )
 
         max_top_k = min(int(args.top_k), pose_samples.shape[1])
-        if max_top_k == 1:
+        if max_top_k == 1 and args.pose_selection == "kde":
             # The KDE-selected pose is already the highest-density particle.
             # Reuse its refinement instead of cropping and encoding it twice.
             top_k = 1
@@ -397,6 +434,7 @@ def main():
                 crop_output_size,
                 map_res,
                 refiner_floorplan_representation,
+                refiner_oriented_crop,
                 device,
                 args.refine_iters,
                 args.delta_scale,
@@ -446,6 +484,7 @@ def main():
                 split,
                 count,
                 args.top_k,
+                args.pose_selection,
                 metrics,
             )
             print(
@@ -472,6 +511,7 @@ def main():
         split,
         count,
         args.top_k,
+        args.pose_selection,
         metrics,
     )
     print(json.dumps(results, indent=2))

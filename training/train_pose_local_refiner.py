@@ -8,7 +8,7 @@ import torch
 import yaml
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,11 +28,32 @@ def build_dataset(config: dict, split: str, deterministic: bool):
         score_sigma_m=float(config.get("refiner_score_sigma_m", 0.5)),
         score_sigma_deg=float(config.get("refiner_score_sigma_deg", 20.0)),
         deterministic=deterministic,
-        seed=int(config.get("refiner_val_seed", 0)),
+        seed=int(config.get("refiner_val_seed", 42)),
     )
 
 
+def build_validation_subset(dataset, dataset_cfg):
+    fraction = float(dataset_cfg.get("val_subset_fraction", 1.0))
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("datasets.val_subset_fraction must be in (0, 1].")
+    if fraction >= 1.0:
+        return dataset
+
+    subset_size = max(1, int(round(len(dataset) * fraction)))
+    generator = torch.Generator().manual_seed(
+        int(dataset_cfg.get("val_subset_seed", 42))
+    )
+    indices = torch.randperm(len(dataset), generator=generator)[:subset_size]
+    indices = indices.sort().values.tolist()
+    print(
+        f"Using fixed validation subset: {subset_size}/{len(dataset)} "
+        f"samples ({fraction:.1%})."
+    )
+    return Subset(dataset, indices)
+
+
 def main(config, ckpt_path=None):
+    pl.seed_everything(int(config.get("seed", 42)), workers=True)
     num_workers = int(config.get("num_workers", 4))
     train_dataset = build_dataset(config, split="train", deterministic=False)
     val_dataset = build_dataset(
@@ -40,6 +61,7 @@ def main(config, ckpt_path=None):
         split=config["datasets"].get("val_split", "val"),
         deterministic=True,
     )
+    val_dataset = build_validation_subset(val_dataset, config["datasets"])
 
     train_loader = DataLoader(
         train_dataset,
@@ -76,6 +98,7 @@ def main(config, ckpt_path=None):
         "{val_refined_0.1m_recall:.3f}_"
         + timestamp,
         save_top_k=3,
+        save_last=True,
         monitor="val_refined_0.5m_recall",
         mode="max",
     )
@@ -98,7 +121,7 @@ def main(config, ckpt_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Baseline.yaml")
+    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")

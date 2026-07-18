@@ -15,7 +15,8 @@
   <img src="assets/framework.png" width="100%">
 </div>
 
-This repository contains the implementation for paper **DisCo-FLoc: Using Dual-Level Visual-Geometric Contrasts to Disambiguate Depth-Aware Visual Floorplan Localization**.
+This branch contains the current two-stage floorplan localization method: a
+full-map pose diffusion model followed by a dense local pose refiner.
 
 ## Environment Setup
 
@@ -26,76 +27,64 @@ This repository contains the implementation for paper **DisCo-FLoc: Using Dual-L
     pip install -r requirements.txt
     ```
 
-## Prerequisites
-
-Before running the training scripts, you need to prepare the dataset and checkpoints.
-
-### 1. Dataset Preparation
-
-We provide a **Metadata Pack** containing processed labels, poses, and DESDF features. You need to combine this with the raw images from the official Structured3D dataset.
-
-**Step 1: Download Metadata**
-*   Download our processed metadata (`datasets_s3d_metadata_only.zip`) from [**[HERE]**](https://drive.google.com/file/d/1Uyl_VoYHTyMi3he5jCuKLNOvgvQMUfYE/view?usp=sharing).
-*   Unzip it to the project root. You will get a folder structure like `datasets_s3d/Structured3D/...`.
-
-**Step 2: Download Raw Data**
-*   Go to the [**Structured3D Official Website**](https://structured3d-dataset.org/) or [**GitHub**](https://github.com/bertjiazheng/Structured3D) to request access and download the **Full** dataset.
-
-**Step 3: Merge Data**
-*   Place the downloaded RGB images into the corresponding `imgs/` folders in our directory structure.
-*   Ensure `map.png` (floorplan) exists in each scene folder (copy from official data if needed).
-
-**Final Structure:**
-```text
-datasets_s3d/
-└── Structured3D/
-    ├── split.yaml
-    ├── desdf/
-    ├── scene_00000/
-    │   ├── poses_map.txt   <-- Included in Metadata
-    │   ├── depth40.txt     <-- Included in Metadata
-    │   ├── map.png         <-- Included in Metadata or Copy from Official
-    │   └── imgs/
-    │       ├── 000.png     <-- PLACE OFFICIAL IMAGES HERE
-    │       └── ...
-    └── ...
-```
-
-### 2. Pretrained Checkpoints
+## Pretrained Backbone
 
 You need the **Depth Anything V2** checkpoint (ViT-S version).
 
 * **Location**: `checkpoints/depth_anything_v2_vits.pth`
 * **Download**: Download the `depth_anything_v2_vits.pth` from [**[HERE]**](https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth).
 
-If you need the **trained DisCo-FLoc checkpoints**, you can download them from [**[HERE]**](https://drive.google.com/drive/folders/1EbVorZNfjDQ6zmYISy_2Xy7rCLOmivXM?usp=sharing).
+## Canonical Configurations
+
+| Dataset | Floorplan | Stage 1 | Stage 2 |
+| --- | --- | --- | --- |
+| S3D | non-semantic gray | `PoseQueryDiffusion_S3D.yaml` | `PoseLocalRefiner_S3D_Dense.yaml` |
+| S3D | semantic one-hot | `PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml` | `PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml` |
+| ZInD | non-semantic gray | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `PoseLocalRefiner_ZInD_MainDiffusion.yaml` |
+| ZInD | semantic one-hot | `PoseQueryDiffusion_ZInD_SemanticOneHot.yaml` | not reported |
+
+S3D and ZInD non-semantic stage-1 models use one grayscale channel. Semantic
+models use five hard one-hot channels. All stage-1 models use the standard
+noise-prediction diffusion objective without a reconstructed-pose auxiliary
+loss.
 
 ## Training
-### Train DisCo Model
 
-To train the DisCo model, run:
-
-```bash
-python training/train_disco_model.py --config DisCo_FLoc.yaml
-```
-
-### Train RRP Model
-
-To train the RRP model, run:
+Train stage 1 and then pass its best checkpoint to the stage-2 configuration:
 
 ```bash
-python training/train_rrp_model.py --config RRP.yaml
+python training/train_pose_query_diffusion.py --config PoseQueryDiffusion_S3D.yaml
+python training/train_pose_local_refiner.py \
+  --config PoseLocalRefiner_S3D_Dense.yaml \
+  --baseline_checkpoint_path /path/to/stage1.ckpt
 ```
 
+Use the corresponding semantic or ZInD configuration from the table above to
+switch datasets and floorplan representations.
 
 ## Evaluation
+
 ```bash
-python eval/eval_disco_model_s3d.py
+python eval/eval_pose_local_refiner.py \
+  --config PoseLocalRefiner_S3D_Dense.yaml \
+  --diffusion_ckpt checkpoints/release_s3d/s3d_no_sem_stage1_best.ckpt \
+  --refiner_ckpt checkpoints/release_s3d/s3d_no_sem_dense_refiner_best.ckpt \
+  --split test
 ```
 
-## Gibson Version
-If you want to train on Gibson datasets, you can
-    ```
-    git checkout main_gibson
-    ```
-to switch to Gibson version.
+Evaluation refines only the KDE-selected pose by default. Pass `--top_k 8`
+explicitly to run the slower candidate-quality reranking ablation.
+
+Release checkpoint manifests are stored under `checkpoints/release_s3d` and
+`checkpoints/release_zind`. Verify all checkpoints against the current code with:
+
+```bash
+python scripts/check_release_checkpoints.py
+```
+
+Run unit tests with third-party pytest plugin auto-loading disabled when the
+shell inherits a ROS environment:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
+```

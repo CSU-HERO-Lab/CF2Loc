@@ -5,7 +5,7 @@
 | Dataset | Config | Scene layout | Map resolution |
 | --- | --- | --- | --- |
 | Structured3D | `PoseQueryDiffusion_S3D.yaml` | `imgs/`, `poses_map.txt` | 0.02 m/pixel |
-| ZInD | `PoseQueryDiffusion_ZInD_S3DBase.yaml` | `rgb/`, `poses_map.txt` | 0.01 m/pixel |
+| ZInD | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `rgb/`, `poses_map.txt` | 0.01 m/pixel |
 
 The local workspace needs the ignored S3D data link once:
 
@@ -20,7 +20,7 @@ Train either dataset with:
   --config PoseQueryDiffusion_S3D.yaml
 
 .venv/bin/python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_ZInD_S3DBase.yaml
+  --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```
 
 The ZInD converter is only needed before first use; its output is already available at `/home/ros/data/zind/disco_floc` on this machine.
