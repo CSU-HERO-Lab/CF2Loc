@@ -4,6 +4,7 @@
 project_name: "disco_model"
 run_name: "pose_query_diffusion_semrayloc_semantic_onehot"
 use_wandb: true
+seed: 42
 gpu_ids: [0]
 epochs: 30
 batch_size: 8
@@ -40,7 +41,6 @@ diffusion_train_particles: 8
 diffusion_val_particles: 64
 diffusion_sample_steps: 20
 diffusion_theta_loss_weight: 1.0
-diffusion_clean_loss_weight: 0.1
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 

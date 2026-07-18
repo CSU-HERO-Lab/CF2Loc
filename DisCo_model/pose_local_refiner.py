@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from DisCo_model.disco_dataset import DisCo_Dataset
-from DisCo_model.orienternet_likelihood import ResNetFloorplanEncoder
+from DisCo_model.floorplan_encoder import ResNetFloorplanEncoder
 from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
 
 
@@ -120,12 +120,10 @@ def load_refiner_map_np(dataset: DisCo_Dataset, floorplan_path: str) -> np.ndarr
             rgb = np.asarray(map_img.convert("RGB"), dtype=np.uint8)
         return dataset._build_semantic_onehot_labels(rgb)
 
-    if representation == "semantic_binary" or (
-        representation not in ("gray", "gray_edges") and is_semantic_floorplan
-    ):
-        with Image.open(floorplan_path) as map_img:
-            rgb = np.asarray(map_img.convert("RGB"), dtype=np.uint8)
-        return dataset._build_semantic_binary_floorplan(rgb)
+    if is_semantic_floorplan and representation not in ("gray", "gray_edges"):
+        raise ValueError(
+            "Semantic floorplans must use the semantic_onehot representation."
+        )
 
     raw_map = cv2.imread(floorplan_path, cv2.IMREAD_GRAYSCALE)
     if raw_map is None:
@@ -333,7 +331,7 @@ class PoseLocalRefiner(nn.Module):
         self.dropout = nn.Dropout(float(config.get("refiner_dropout", 0.1)))
         self.refiner_map_input_mode = config.get(
             "refiner_map_input_mode",
-            config.get("diffusion_map_input_mode", "gray_edges"),
+            config["diffusion_map_input_mode"],
         )
 
         diffusion = PoseQueryDiffusionLocalizer(config)
@@ -660,7 +658,7 @@ class PoseLocalRefinerLightning(pl.LightningModule):
         self.score_weight = float(config.get("refiner_score_loss_weight", 0.25))
         self.dense_heatmap_weight = float(config.get("refiner_dense_heatmap_loss_weight", 1.0))
         self.dense_heatmap_sigma_m = float(config.get("refiner_dense_heatmap_sigma_m", 0.2))
-        refiner_arch = config.get("refiner_arch", "query_regression")
+        refiner_arch = config.get("refiner_arch", "dense_heatmap")
         if refiner_arch == "query_regression":
             self.refiner = PoseLocalRefiner(config)
         elif refiner_arch == "dense_heatmap":

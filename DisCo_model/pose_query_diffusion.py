@@ -9,7 +9,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from DisCo_model.image_patch_encoder import ImagePatchEncoder
-from DisCo_model.orienternet_likelihood import ResNetFloorplanEncoder
+from DisCo_model.floorplan_encoder import ResNetFloorplanEncoder
 
 
 LEGACY_COORDINATE_CONVENTION = "legacy_normalized_v0"
@@ -134,7 +134,7 @@ class ImageConditionedMapEncoder(nn.Module):
         map_feature_dim = int(config.get("diffusion_map_feature_dim", 64))
         self.map_encoder = ResNetFloorplanEncoder(
             feature_dim=map_feature_dim,
-            input_mode=config.get("diffusion_map_input_mode", "gray_edges"),
+            input_mode=config["diffusion_map_input_mode"],
             context_blocks=int(config.get("diffusion_map_context_blocks", 2)),
             pretrained=bool(config.get("diffusion_map_pretrained", False)),
         )
@@ -502,7 +502,6 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         self.val_particles = int(config.get("diffusion_val_particles", 64))
         self.sample_steps = int(config.get("diffusion_sample_steps", 20))
         self.theta_loss_weight = float(config.get("diffusion_theta_loss_weight", 1.0))
-        self.clean_loss_weight = float(config.get("diffusion_clean_loss_weight", 0.1))
         self.mode_sigma_m = float(config.get("diffusion_mode_sigma_m", 0.75))
         self.mode_sigma_deg = float(config.get("diffusion_mode_sigma_deg", 20.0))
 
@@ -531,7 +530,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         return values[timesteps].unsqueeze(-1)
 
     @staticmethod
-    def constrain_clean_pose(pose_state: torch.Tensor) -> torch.Tensor:
+    def constrain_pose_state(pose_state: torch.Tensor) -> torch.Tensor:
         xy = pose_state[..., :2].clamp(-1.0, 1.0)
         angle = F.normalize(pose_state[..., 2:4], dim=-1, eps=1e-6)
         return torch.cat([xy, angle], dim=-1)
@@ -542,7 +541,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         return torch.cat([xy, angle], dim=-1)
 
     def decode_pose(self, pose_state: torch.Tensor, wh: torch.Tensor) -> torch.Tensor:
-        pose_state = self.constrain_clean_pose(pose_state)
+        pose_state = self.constrain_pose_state(pose_state)
         xy = normalized_to_map_xy(pose_state[..., :2], wh)
         theta = torch.remainder(
             torch.atan2(pose_state[..., 2], pose_state[..., 3]),
@@ -552,27 +551,27 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
 
     def q_sample(
         self,
-        clean_pose: torch.Tensor,
+        x0_pose: torch.Tensor,
         timesteps: torch.Tensor,
         noise: torch.Tensor,
     ) -> torch.Tensor:
         return (
-            self._extract(self.sqrt_alpha_cumprod, timesteps) * clean_pose
+            self._extract(self.sqrt_alpha_cumprod, timesteps) * x0_pose
             + self._extract(self.sqrt_one_minus_alpha_cumprod, timesteps) * noise
         )
 
-    def predict_clean_pose(
+    def predict_x0_pose(
         self,
         noisy_pose: torch.Tensor,
         timesteps: torch.Tensor,
         predicted_noise: torch.Tensor,
     ) -> torch.Tensor:
-        clean_pose = (
+        x0_pose = (
             noisy_pose
             - self._extract(self.sqrt_one_minus_alpha_cumprod, timesteps)
             * predicted_noise
         ) / self._extract(self.sqrt_alpha_cumprod, timesteps).clamp_min(1e-6)
-        return self.constrain_clean_pose(clean_pose)
+        return self.constrain_pose_state(x0_pose)
 
     def diffusion_loss(
         self,
@@ -583,7 +582,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         image_global: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         batch_size = pose.shape[0]
-        clean_pose = self.encode_pose(pose, wh).unsqueeze(1).expand(
+        x0_pose = self.encode_pose(pose, wh).unsqueeze(1).expand(
             -1, self.train_particles, -1
         )
         timesteps = torch.randint(
@@ -592,8 +591,8 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
             (batch_size, self.train_particles),
             device=pose.device,
         )
-        noise = torch.randn_like(clean_pose)
-        noisy_pose = self.q_sample(clean_pose, timesteps, noise)
+        noise = torch.randn_like(x0_pose)
+        noisy_pose = self.q_sample(x0_pose, timesteps, noise)
         predicted_noise = self.denoiser(
             noisy_pose,
             timesteps,
@@ -608,29 +607,9 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         theta_noise_loss = F.mse_loss(predicted_noise[..., 2:4], noise[..., 2:4])
         noise_loss = xy_noise_loss + self.theta_loss_weight * theta_noise_loss
 
-        predicted_clean = self.predict_clean_pose(
-            noisy_pose,
-            timesteps,
-            predicted_noise,
-        )
-        clean_xy_loss = F.smooth_l1_loss(
-            predicted_clean[..., :2],
-            clean_pose[..., :2],
-        )
-        clean_angle_loss = (
-            1.0
-            - torch.sum(
-                predicted_clean[..., 2:4] * clean_pose[..., 2:4],
-                dim=-1,
-            )
-        ).mean()
-        clean_loss = clean_xy_loss + self.theta_loss_weight * clean_angle_loss
-        loss = noise_loss + self.clean_loss_weight * clean_loss
-        return loss, {
+        return noise_loss, {
             "xy_noise_loss": xy_noise_loss,
             "theta_noise_loss": theta_noise_loss,
-            "clean_xy_loss": clean_xy_loss,
-            "clean_angle_loss": clean_angle_loss,
         }
 
     @torch.no_grad()
@@ -677,15 +656,15 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
                 wh,
                 self.map_res,
             )
-            clean_pose = self.predict_clean_pose(state, timesteps, predicted_noise)
+            x0_pose = self.predict_x0_pose(state, timesteps, predicted_noise)
             if step_idx == len(timestep_values) - 1:
-                state = clean_pose
+                state = x0_pose
                 break
 
             previous_timestep = timestep_values[step_idx + 1]
             previous_alpha = self.alpha_cumprod[previous_timestep]
             state = (
-                previous_alpha.sqrt() * clean_pose
+                previous_alpha.sqrt() * x0_pose
                 + (1.0 - previous_alpha).sqrt() * predicted_noise
             )
 
@@ -848,7 +827,12 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         )
         scheduler = CosineAnnealingLR(
             optimizer,
-            T_max=int(self.config.get("epochs", 30)),
+            T_max=int(
+                self.config.get(
+                    "lr_t_max_epochs",
+                    self.config.get("epochs", 30),
+                )
+            ),
             eta_min=float(self.config.get("min_lr", 1e-5)),
         )
         return {

@@ -34,12 +34,6 @@ class DisCo_Dataset(Dataset):
             "floorplan_representation",
             "rgb",
         )
-        self.floorplan_wall_threshold = int(
-            self.dataset_cfg.get("floorplan_wall_threshold", 250)
-        )
-        self.floorplan_fill_wall_dilation = int(
-            self.dataset_cfg.get("floorplan_fill_wall_dilation", 1)
-        )
         self.map_pose_rot_aug = self.dataset_cfg.get("map_pose_rot_aug", {})
         self.map_pose_rot_aug_enable = bool(
             self.map_pose_rot_aug.get("enable", False)
@@ -254,13 +248,19 @@ class DisCo_Dataset(Dataset):
 
     def _load_data(self, data_folder, data_split):
         data = []
+        map_data_folder = self.dataset_cfg.get("map_data_folder")
         for scene in data_split:
             cur_dir = os.path.join(data_folder, scene)
             if not os.path.exists(cur_dir):
                 continue
 
             scene_format = self._scene_format(cur_dir)
-            map_path = os.path.join(cur_dir, scene_format["map_file"])
+            map_dir = (
+                os.path.join(map_data_folder, scene)
+                if map_data_folder
+                else cur_dir
+            )
+            map_path = os.path.join(map_dir, scene_format["map_file"])
             pose_path = os.path.join(cur_dir, scene_format["pose_file"])
             depth_path = os.path.join(cur_dir, self.dataset_cfg.get("depth_file", "depth40.txt"))
             rgb_dir = os.path.join(cur_dir, scene_format["rgb_dir"])
@@ -314,41 +314,6 @@ class DisCo_Dataset(Dataset):
                 )
         return data
 
-    def _build_ternary_floorplan(self, gray_img):
-        wall = (gray_img < self.floorplan_wall_threshold).astype(np.uint8)
-        wall_for_fill = wall
-        if self.floorplan_fill_wall_dilation > 0:
-            kernel = np.ones((3, 3), dtype=np.uint8)
-            wall_for_fill = cv2.dilate(
-                wall,
-                kernel,
-                iterations=self.floorplan_fill_wall_dilation,
-            )
-
-        free_candidate = (wall_for_fill == 0).astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(free_candidate, connectivity=4)
-        if num_labels <= 1:
-            outside = np.zeros_like(free_candidate, dtype=bool)
-        else:
-            border_labels = np.unique(
-                np.concatenate(
-                    [
-                        labels[0, :],
-                        labels[-1, :],
-                        labels[:, 0],
-                        labels[:, -1],
-                    ]
-                )
-            )
-            border_labels = border_labels[border_labels != 0]
-            outside = np.isin(labels, border_labels)
-
-        indoor_free = (free_candidate > 0) & ~outside
-        ternary = np.zeros_like(gray_img, dtype=np.float32)
-        ternary[wall_for_fill > 0] = 0.5
-        ternary[indoor_free] = 1.0
-        return ternary
-
     @staticmethod
     def _build_semantic_onehot_labels(rgb_img):
         rgb = rgb_img.astype(np.int16)
@@ -371,35 +336,9 @@ class DisCo_Dataset(Dataset):
         labels[other] = 4
         return labels
 
-    @staticmethod
-    def _build_semantic_binary_floorplan(rgb_img):
-        rgb = rgb_img.astype(np.int16)
-        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-        mean = rgb.mean(axis=-1)
-
-        door = (r > 150) & ((r - g) > 10) & ((r - b) > 10)
-        window = (b > 150) & ((b - r) > 10) & ((b - g) > 10)
-        free = door | ((mean > 180) & ~window)
-        binary = np.zeros(rgb.shape[:2], dtype=np.uint8)
-        binary[free] = 255
-        return binary
-
     def _load_floorplan(self, floorplan_path, rotation_k=0):
         try:
             with Image.open(floorplan_path) as img:
-                if self.floorplan_representation == "semantic_binary":
-                    img = img.convert("RGB")
-                    rgb = np.asarray(img, dtype=np.uint8)
-                    rgb = self._rotate_array_90(rgb, rotation_k)
-                    binary = self._build_semantic_binary_floorplan(rgb)
-                    img = Image.fromarray(binary, mode="L")
-                    img = img.resize(
-                        self.floorplan_img_size,
-                        resample=Image.Resampling.NEAREST,
-                    )
-                    binary = np.asarray(img, dtype=np.float32) / 255.0
-                    return torch.from_numpy(binary).float().unsqueeze(0)
-
                 if self.floorplan_representation == "semantic_onehot":
                     img = img.convert("RGB")
                     rgb = np.asarray(img, dtype=np.uint8)
@@ -414,18 +353,6 @@ class DisCo_Dataset(Dataset):
                     onehot = np.eye(5, dtype=np.float32)[labels]
                     return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
 
-                if self.floorplan_representation == "gray_ternary":
-                    img = img.convert("L")
-                    gray = np.asarray(img, dtype=np.uint8)
-                    gray = self._rotate_array_90(gray, rotation_k)
-                    img = Image.fromarray(gray, mode="L")
-                    img = img.resize(self.floorplan_img_size)
-                    gray = np.asarray(img, dtype=np.uint8)
-                    gray_float = gray.astype(np.float32) / 255.0
-                    ternary = self._build_ternary_floorplan(gray)
-                    stacked = np.stack([gray_float, ternary], axis=0)
-                    return torch.from_numpy(stacked).float()
-
                 img = img.convert("RGB")
                 rgb = np.asarray(img, dtype=np.uint8)
                 rgb = self._rotate_array_90(rgb, rotation_k)
@@ -434,10 +361,6 @@ class DisCo_Dataset(Dataset):
                 return transforms.ToTensor()(img)
         except Exception as e:
             print(f"Failed to load floorplan {floorplan_path}: {e}")
-            if self.floorplan_representation == "gray_ternary":
-                return torch.zeros((2, *self.floorplan_img_size))
-            if self.floorplan_representation == "semantic_binary":
-                return torch.zeros((1, *self.floorplan_img_size))
             if self.floorplan_representation == "semantic_onehot":
                 return torch.zeros((5, *self.floorplan_img_size))
             return torch.zeros((3, *self.floorplan_img_size))

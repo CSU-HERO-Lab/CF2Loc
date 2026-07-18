@@ -1,7 +1,8 @@
-# Full-map pose-query diffusion localizer.
+# S3D non-semantic model reported in the paper.
 project_name: "disco_model"
-run_name: "pose_query_diffusion_resnet18_s3d"
+run_name: "pose_query_diffusion_s3d_no_sem"
 use_wandb: true
+seed: 42
 gpu_ids: [0]
 epochs: 30
 batch_size: 8
@@ -19,7 +20,7 @@ freeze_image_backbone: true
 image_token_grid: [6, 40]
 diffusion_feature_dim: 128
 diffusion_map_feature_dim: 64
-diffusion_map_input_mode: "gray_edges"
+diffusion_map_input_mode: "gray"
 diffusion_map_context_blocks: 2
 diffusion_map_pretrained: false
 diffusion_image_layers: 1
@@ -34,7 +35,6 @@ diffusion_train_particles: 8
 diffusion_val_particles: 64
 diffusion_sample_steps: 20
 diffusion_theta_loss_weight: 1.0
-diffusion_clean_loss_weight: 0.1
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 
@@ -50,7 +50,12 @@ datasets:
   data_splits: "datasets_s3d/Structured3D/split.yaml"
   val_split: "val"
   floorplan_img_size: [256, 256]
+  floorplan_representation: "rgb"
   local_map_crop_size_meters: 5.0
+  map_pose_rot_aug:
+    enable: true
+    p: 0.5
+    angles: [90, 180, 270]
   hard_negative:
     mode: "none"
   pose_aug:

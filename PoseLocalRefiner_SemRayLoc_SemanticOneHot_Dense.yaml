@@ -1,6 +1,7 @@
 project_name: "disco_model"
 run_name: "pose_local_refiner_semrayloc_semantic_onehot_dense"
 use_wandb: true
+seed: 42
 gpu_ids: [0]
 epochs: 30
 batch_size: 16
@@ -13,7 +14,7 @@ num_sanity_val_steps: 1
 
 # Used to initialize the frozen observation image encoder. Override this with
 # the matching semantic-onehot diffusion checkpoint for full semantic eval.
-baseline_checkpoint_path: "/home/ros/meng/DisCo-FLoc-p0-metric-coords/logs/pose_diffusion_runs/pose_query_diffusion_semrayloc_semantic_onehot_metric_coords/checkpoints/epoch=28-val_1m_recall=0.744-val_best_of_64_1m_recall=0.948_20260711_030112.ckpt"
+baseline_checkpoint_path: "checkpoints/release_s3d/s3d_semantic_onehot_stage1_best.ckpt"
 
 # Frozen baseline image conditioning.
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
@@ -38,7 +39,6 @@ diffusion_train_particles: 8
 diffusion_val_particles: 64
 diffusion_sample_steps: 20
 diffusion_theta_loss_weight: 1.0
-diffusion_clean_loss_weight: 0.1
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 
@@ -61,7 +61,7 @@ refiner_score_loss_weight: 0.25
 refiner_dense_heatmap_loss_weight: 1.0
 refiner_dense_heatmap_sigma_m: 0.2
 refiner_dense_temperature: 1.0
-refiner_val_seed: 0
+refiner_val_seed: 42
 
 # Optimizer.
 lr: 1.0e-4
