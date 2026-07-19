@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="/home/ros/meng/DisCo-FLoc-main-diffusion"
 PYTHON="/home/ros/meng/DisCo-FLoc/.venv/bin/python"
-BLOCKING_SESSION="final_seed42_rerun_queue"
+BLOCKING_SESSION="${BLOCKING_SESSION:-final_seed42_rerun_queue}"
 CONFIG="PoseQueryDiffusion_S3D_NoMapRotAug.yaml"
 RUN_NAME="pose_query_diffusion_s3d_no_sem_no_map_rot_aug_seed42"
 RUN_DIR="$ROOT/logs/pose_diffusion_runs/$RUN_NAME"
