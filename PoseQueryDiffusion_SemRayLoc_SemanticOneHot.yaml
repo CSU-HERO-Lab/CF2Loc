@@ -6,7 +6,7 @@ run_name: "pose_query_diffusion_semrayloc_semantic_onehot"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
-epochs: 30
+epochs: 60
 batch_size: 8
 val_batch_size: 4
 num_workers: 4

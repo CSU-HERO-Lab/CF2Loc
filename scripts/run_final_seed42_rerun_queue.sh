@@ -21,6 +21,25 @@ select_best() {
     "$1/checkpoints" --monitor "$2"
 }
 
+run_reached_target_epoch() {
+  local config="$1"
+  local checkpoint="$2"
+  [[ -f "$checkpoint" ]] || return 1
+  "$PYTHON" - "$config" "$checkpoint" <<'PY'
+import sys
+
+import torch
+import yaml
+
+config_path, checkpoint_path = sys.argv[1:]
+with open(config_path, encoding="utf-8") as config_file:
+    target_epochs = int(yaml.safe_load(config_file)["epochs"])
+checkpoint = torch.load(checkpoint_path, map_location="cpu")
+completed_epochs = int(checkpoint.get("epoch", -1)) + 1
+raise SystemExit(0 if completed_epochs >= target_epochs else 1)
+PY
+}
+
 run_stage1() {
   local config="$1"
   local run_name="$2"
@@ -28,6 +47,11 @@ run_stage1() {
   local marker="$run_dir/seed42.complete"
   local resume_args=()
   mkdir -p "$run_dir"
+  if run_reached_target_epoch "$config" "$run_dir/checkpoints/last.ckpt"; then
+    touch "$marker"
+  else
+    rm -f "$marker"
+  fi
   if [[ ! -f "$marker" ]]; then
     if [[ -f "$run_dir/checkpoints/last.ckpt" ]]; then
       resume_args=(--ckpt_path "$run_dir/checkpoints/last.ckpt")
@@ -53,6 +77,11 @@ run_refiner() {
   local marker="$run_dir/seed42.complete"
   local resume_args=()
   mkdir -p "$run_dir"
+  if run_reached_target_epoch "$config" "$run_dir/checkpoints/last.ckpt"; then
+    touch "$marker"
+  else
+    rm -f "$marker"
+  fi
   if [[ ! -f "$marker" ]]; then
     if [[ -f "$run_dir/checkpoints/last.ckpt" ]]; then
       resume_args=(--ckpt_path "$run_dir/checkpoints/last.ckpt")

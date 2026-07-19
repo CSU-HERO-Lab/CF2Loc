@@ -46,7 +46,8 @@ You need the **Depth Anything V2** checkpoint (ViT-S version).
 S3D and ZInD non-semantic stage-1 models use one grayscale channel. Semantic
 models use five hard one-hot channels. All stage-1 models use the standard
 noise-prediction diffusion objective without a reconstructed-pose auxiliary
-loss.
+loss. Semantic stage-1 models train for 60 epochs; non-semantic stage-1 models
+and all local refiners train for 30 epochs.
 
 ## Training
 
