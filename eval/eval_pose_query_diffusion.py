@@ -32,6 +32,11 @@ def parse_args():
     parser.add_argument("--subset-fraction", type=float)
     parser.add_argument("--subset-seed", type=int, default=0)
     parser.add_argument(
+        "--pose-selection",
+        choices=("kde", "mean"),
+        default="kde",
+    )
+    parser.add_argument(
         "--flip-target-map-vertical",
         action="store_true",
         help=(
@@ -71,6 +76,14 @@ def summarize(xy_errors, theta_errors):
         "median_xy_err_m": float(xy_errors.median()),
         "mean_theta_err_deg": float(torch.rad2deg(theta_errors).mean()),
     }
+
+
+def pose_sample_mean(pose_samples):
+    xy = pose_samples[..., :2].mean(dim=1)
+    sin_theta = torch.sin(pose_samples[..., 2]).mean(dim=1)
+    cos_theta = torch.cos(pose_samples[..., 2]).mean(dim=1)
+    theta = torch.atan2(sin_theta, cos_theta)
+    return torch.cat([xy, theta.unsqueeze(-1)], dim=-1)
 
 
 def summarize_angle_offset_sweep(xy_errors, theta_deltas):
@@ -189,6 +202,8 @@ def main():
                 num_steps=int(config.get("diffusion_sample_steps", 20)),
             )
             selected_pose, _density = model.select_pose_mode(pose_samples)
+            if args.pose_selection == "mean":
+                selected_pose = pose_sample_mean(pose_samples)
             xy_error = torch.linalg.norm(
                 selected_pose[:, :2] - gt_pose[:, :2], dim=-1
             ) * model.map_res
@@ -209,6 +224,7 @@ def main():
         "seed": args.seed,
         "num_particles": int(config.get("diffusion_val_particles", 64)),
         "num_steps": int(config.get("diffusion_sample_steps", 20)),
+        "pose_selection": args.pose_selection,
         "target_total_samples": total_samples,
         "subset_fraction": args.subset_fraction,
         "subset_seed": args.subset_seed if args.subset_fraction is not None else None,
