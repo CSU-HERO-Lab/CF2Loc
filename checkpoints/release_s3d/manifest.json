@@ -1,0 +1,51 @@
+{
+  "dataset": "Structured3D",
+  "selection_split": "val",
+  "final_evaluation_split": "test",
+  "checkpoints": [
+    {
+      "name": "s3d_no_sem_stage1_best.ckpt",
+      "stage": "stage1_diffusion",
+      "floorplan": "non_semantic_gray",
+      "config": "PoseQueryDiffusion_S3D.yaml",
+      "source_run": "pose_query_diffusion_s3d_gray_no_clean",
+      "source_epoch": 29,
+      "selection_metric": "val_1m_recall",
+      "selection_value": 0.7127564549,
+      "sha256": "d01e891fb49678b5db71c96f9c5b06c8b7a873ef03573552e0575546d436a37a"
+    },
+    {
+      "name": "s3d_no_sem_dense_refiner_best.ckpt",
+      "stage": "stage2_dense_refiner",
+      "floorplan": "non_semantic_gray_edges",
+      "config": "PoseLocalRefiner_S3D_Dense.yaml",
+      "source_run": "pose_local_refiner_s3d_dense_baseline",
+      "source_epoch": 28,
+      "selection_metric": "val_refined_0.5m_recall",
+      "selection_value": 0.8266428709,
+      "sha256": "0365cabf78fa17d1660f869b95fc5223adba7d61b5e1b6eed116d57764589000"
+    },
+    {
+      "name": "s3d_semantic_onehot_stage1_best.ckpt",
+      "stage": "stage1_diffusion",
+      "floorplan": "semantic_onehot",
+      "config": "PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml",
+      "source_run": "pose_query_diffusion_semrayloc_semantic_onehot_metric_coords_repro",
+      "source_epoch": 50,
+      "selection_metric": "val_1m_recall",
+      "selection_value": 0.7572,
+      "sha256": "06da331aebaea4cff5e97b11aafea17fd0dc6c24c51acf4afea85f9bc6b317fd"
+    },
+    {
+      "name": "s3d_semantic_onehot_dense_refiner_best.ckpt",
+      "stage": "stage2_dense_refiner",
+      "floorplan": "semantic_onehot",
+      "config": "PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml",
+      "source_run": "pose_local_refiner_semrayloc_semantic_onehot_dense",
+      "source_epoch": 29,
+      "selection_metric": "val_refined_0.5m_recall",
+      "selection_value_rounded": 0.842,
+      "sha256": "76a6d6b6c9d487168363b8bb0eb147847d65988fa711192a1b092c35298dce28"
+    }
+  ]
+}
