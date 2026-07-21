@@ -25,6 +25,8 @@ def parse_args():
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--sample-index", type=int, default=0)
+    parser.add_argument("--num-particles", type=int, default=64)
+    parser.add_argument("--num-steps", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
@@ -59,6 +61,8 @@ def main():
     args = parse_args()
     if args.warmup < 0 or args.repeats < 1:
         raise ValueError("warmup must be non-negative and repeats must be positive")
+    if args.num_particles < 1 or args.num_steps < 1:
+        raise ValueError("num-particles and num-steps must be positive")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -102,8 +106,8 @@ def main():
                 map_coordinates,
                 image_global,
                 wh,
-                num_particles=64,
-                num_steps=20,
+                num_particles=args.num_particles,
+                num_steps=args.num_steps,
                 cache_map_kv=cache_map_kv,
             )
             return model.select_pose_mode(samples)[0]
@@ -113,8 +117,8 @@ def main():
             samples = model.sample_from_context(
                 *context,
                 wh,
-                num_particles=64,
-                num_steps=20,
+                num_particles=args.num_particles,
+                num_steps=args.num_steps,
                 cache_map_kv=cache_map_kv,
             )
             return model.select_pose_mode(samples)[0]
@@ -157,8 +161,8 @@ def main():
         "checkpoint": os.path.abspath(args.ckpt),
         "device": str(device),
         "batch_size": 1,
-        "particles": 64,
-        "sampling_steps": 20,
+        "particles": args.num_particles,
+        "sampling_steps": args.num_steps,
         "warmup": args.warmup,
         "repeats": args.repeats,
         "max_abs_output_difference": max_abs_difference,
