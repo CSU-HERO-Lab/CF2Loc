@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -248,6 +248,21 @@ class PoseMapCrossAttention(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
+    def project_map_tokens(
+        self,
+        map_tokens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, num_map_tokens, feature_dim = map_tokens.shape
+        key = self.key(map_tokens).view(
+            batch_size, num_map_tokens, self.num_heads, self.head_dim
+        )
+        value = self.value(map_tokens).view(
+            batch_size, num_map_tokens, self.num_heads, self.head_dim
+        )
+        if feature_dim != self.num_heads * self.head_dim:
+            raise ValueError("Unexpected map-token feature dimension.")
+        return key, value
+
     @staticmethod
     def build_metric_relative_features(
         noisy_pose: torch.Tensor,
@@ -304,6 +319,7 @@ class PoseMapCrossAttention(nn.Module):
         map_coordinates: torch.Tensor,
         wh: torch.Tensor,
         map_res,
+        map_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         batch_size, num_particles, feature_dim = pose_tokens.shape
         num_map_tokens = map_tokens.shape[1]
@@ -311,12 +327,20 @@ class PoseMapCrossAttention(nn.Module):
         query = self.query(pose_tokens).view(
             batch_size, num_particles, self.num_heads, self.head_dim
         )
-        key = self.key(map_tokens).view(
-            batch_size, num_map_tokens, self.num_heads, self.head_dim
-        )
-        value = self.value(map_tokens).view(
-            batch_size, num_map_tokens, self.num_heads, self.head_dim
-        )
+        if map_key_value is None:
+            key, value = self.project_map_tokens(map_tokens)
+        else:
+            key, value = map_key_value
+            expected_shape = (
+                batch_size,
+                num_map_tokens,
+                self.num_heads,
+                self.head_dim,
+            )
+            if key.shape != expected_shape or value.shape != expected_shape:
+                raise ValueError(
+                    "Cached map K/V shape does not match the current map tokens."
+                )
         attention = torch.einsum("bmhd,bnhd->bhmn", query, key) * self.scale
 
         if self.coordinate_convention == METRIC_COORDINATE_CONVENTION:
@@ -391,6 +415,7 @@ class PoseDenoiserBlock(nn.Module):
         map_coordinates: torch.Tensor,
         wh: torch.Tensor,
         map_res,
+        map_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         attended = self.cross_attn(
             pose_tokens,
@@ -399,6 +424,7 @@ class PoseDenoiserBlock(nn.Module):
             map_coordinates,
             wh,
             map_res,
+            map_key_value=map_key_value,
         )
         pose_tokens = self.cross_norm(pose_tokens + self.dropout(attended))
         return self.ffn_norm(pose_tokens + self.dropout(self.ffn(pose_tokens)))
@@ -457,6 +483,15 @@ class PoseQueryDenoiser(nn.Module):
             )
         return torch.cat(features, dim=-1)
 
+    def build_map_kv_cache(
+        self,
+        map_tokens: torch.Tensor,
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], ...]:
+        return tuple(
+            block.cross_attn.project_map_tokens(map_tokens)
+            for block in self.blocks
+        )
+
     def forward(
         self,
         noisy_pose: torch.Tensor,
@@ -466,11 +501,16 @@ class PoseQueryDenoiser(nn.Module):
         image_global: torch.Tensor,
         wh: torch.Tensor,
         map_res,
+        map_kv_cache: Optional[
+            Sequence[Tuple[torch.Tensor, torch.Tensor]]
+        ] = None,
     ) -> torch.Tensor:
+        if map_kv_cache is not None and len(map_kv_cache) != len(self.blocks):
+            raise ValueError("Map K/V cache must contain one entry per block.")
         pose_tokens = self.pose_mlp(self.fourier_encode(noisy_pose))
         pose_tokens = pose_tokens + self.time_embedding(timesteps)
         pose_tokens = pose_tokens + self.image_global_projection(image_global).unsqueeze(1)
-        for block in self.blocks:
+        for block_index, block in enumerate(self.blocks):
             pose_tokens = block(
                 pose_tokens,
                 map_tokens,
@@ -478,6 +518,11 @@ class PoseQueryDenoiser(nn.Module):
                 map_coordinates,
                 wh,
                 map_res,
+                map_key_value=(
+                    map_kv_cache[block_index]
+                    if map_kv_cache is not None
+                    else None
+                ),
             )
         return self.output(pose_tokens)
 
@@ -621,6 +666,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         wh: torch.Tensor,
         num_particles: int = None,
         num_steps: int = None,
+        cache_map_kv: bool = True,
     ) -> torch.Tensor:
         num_particles = int(num_particles or self.val_particles)
         num_steps = int(num_steps or self.sample_steps)
@@ -640,6 +686,11 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
             device=map_tokens.device,
         ).long()
         timestep_values = torch.unique_consecutive(timestep_values)
+        map_kv_cache = (
+            self.denoiser.build_map_kv_cache(map_tokens)
+            if cache_map_kv
+            else None
+        )
         for step_idx, timestep_value in enumerate(timestep_values):
             timesteps = torch.full(
                 (batch_size, num_particles),
@@ -655,6 +706,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
                 image_global,
                 wh,
                 self.map_res,
+                map_kv_cache=map_kv_cache,
             )
             x0_pose = self.predict_x0_pose(state, timesteps, predicted_noise)
             if step_idx == len(timestep_values) - 1:
