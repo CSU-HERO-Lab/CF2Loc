@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num-particles", type=int)
+    parser.add_argument("--num-steps", type=int)
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--subset-fraction", type=float)
     parser.add_argument("--subset-seed", type=int, default=0)
@@ -121,6 +123,18 @@ def main():
     args = parse_args()
     with open(args.config, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
+    num_particles = int(
+        args.num_particles
+        if args.num_particles is not None
+        else config.get("diffusion_val_particles", 64)
+    )
+    num_steps = int(
+        args.num_steps
+        if args.num_steps is not None
+        else config.get("diffusion_sample_steps", 20)
+    )
+    if num_particles < 1 or num_steps < 1:
+        raise ValueError("num_particles and num_steps must be positive")
 
     seed_everything(args.seed)
     dataset_cfg = config["datasets"]
@@ -198,8 +212,8 @@ def main():
                 map_coordinates,
                 image_global,
                 wh,
-                num_particles=int(config.get("diffusion_val_particles", 64)),
-                num_steps=int(config.get("diffusion_sample_steps", 20)),
+                num_particles=num_particles,
+                num_steps=num_steps,
             )
             selected_pose, _density = model.select_pose_mode(pose_samples)
             if args.pose_selection == "mean":
@@ -222,8 +236,8 @@ def main():
         "checkpoint": os.path.abspath(args.ckpt),
         "split": split,
         "seed": args.seed,
-        "num_particles": int(config.get("diffusion_val_particles", 64)),
-        "num_steps": int(config.get("diffusion_sample_steps", 20)),
+        "num_particles": num_particles,
+        "num_steps": num_steps,
         "pose_selection": args.pose_selection,
         "target_total_samples": total_samples,
         "subset_fraction": args.subset_fraction,
