@@ -1,12 +1,10 @@
-# Full-map pose-query diffusion on SemRayLoc-compatible semantic floorplans.
-# Semantic floorplans are converted to hard one-hot channels:
-# free, wall, door/opening, window, other/background.
+# Structured3D non-semantic model reported in the paper.
 project_name: "cf2loc"
-run_name: "pose_query_diffusion_semrayloc_semantic_onehot"
+run_name: "pose_query_diffusion_s3d_no_sem"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
-epochs: 60
+epochs: 30
 batch_size: 8
 val_batch_size: 4
 num_workers: 4
@@ -22,7 +20,7 @@ freeze_image_backbone: true
 image_token_grid: [6, 40]
 diffusion_feature_dim: 128
 diffusion_map_feature_dim: 64
-diffusion_map_input_mode: "semantic_onehot"
+diffusion_map_input_mode: "gray"
 diffusion_map_context_blocks: 2
 diffusion_map_pretrained: false
 diffusion_image_layers: 1
@@ -31,11 +29,7 @@ diffusion_num_heads: 4
 diffusion_dropout: 0.1
 diffusion_pose_fourier_bands: 4
 
-# Continuous pose diffusion. Use metric cell-center map coordinates and metric
-# relative pose-to-map features; this is the reproduced semantic S3D baseline.
-diffusion_coordinate_convention: "metric_cell_center_v1"
-diffusion_metric_relative_max_m: 20.0
-diffusion_metric_relative_scale_m: 5.0
+# Continuous pose diffusion.
 diffusion_train_steps: 1000
 diffusion_train_particles: 8
 diffusion_val_particles: 64
@@ -44,26 +38,19 @@ diffusion_theta_loss_weight: 1.0
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 
-# Reproduced effective semantic baseline optimizer.
+# Optimizer.
 lr: 1.0e-4
 min_lr: 1.0e-5
 weight_decay: 1.0e-4
 
 datasets:
-  dataset_type: "semrayloc"
-  map_res: 0.01
-  data_folder: "datasets_semrayloc/processed"
-  data_splits: "datasets_semrayloc/split.yaml"
+  dataset_type: "s3d"
+  map_res: 0.02
+  data_folder: "datasets_s3d/Structured3D"
+  data_splits: "datasets_s3d/Structured3D/split.yaml"
   val_split: "val"
   floorplan_img_size: [256, 256]
-  floorplan_representation: "semantic_onehot"
-  map_file: "floorplan_semantic.png"
-  pose_file: "poses.txt"
-  pose_in_meters: true
-  pose_meter_origin: "top_left"
-  pose_theta_sign: -1.0
-  rgb_dir: "rgb"
-  depth_file: "depth.txt"
+  floorplan_representation: "rgb"
   local_map_crop_size_meters: 5.0
   map_pose_rot_aug:
     enable: true

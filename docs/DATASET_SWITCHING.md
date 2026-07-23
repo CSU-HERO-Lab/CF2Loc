@@ -6,8 +6,8 @@ configuration.
 
 | Dataset | Stage-1 config | Expected data root | Map resolution |
 | --- | --- | --- | --- |
-| Structured3D | `PoseQueryDiffusion_S3D.yaml` | `datasets_s3d/Structured3D` | 0.02 m/pixel |
-| ZInD | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `datasets_zind/disco_floc` | 0.01 m/pixel |
+| Structured3D | `configs/PoseQueryDiffusion_S3D.yaml` | `datasets_s3d/Structured3D` | 0.02 m/pixel |
+| ZInD | `configs/PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `datasets_zind/disco_floc` | 0.01 m/pixel |
 
 The data directories are ignored by Git. They may be real directories or
 symbolic links:
@@ -21,10 +21,10 @@ Train either dataset with:
 
 ```bash
 python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_S3D.yaml
+  --config configs/PoseQueryDiffusion_S3D.yaml
 
 python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
+  --config configs/PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```
 
 Semantic configurations additionally expect SemRayLoc-compatible semantic

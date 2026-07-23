@@ -21,7 +21,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Benchmark batch-one S3D stage-one inference latency."
     )
-    parser.add_argument("--config", default="PoseQueryDiffusion_S3D.yaml")
+    parser.add_argument("--config", default="configs/PoseQueryDiffusion_S3D.yaml")
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--sample-index", type=int, default=0)

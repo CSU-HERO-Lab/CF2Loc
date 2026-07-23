@@ -225,7 +225,7 @@ def refine_candidates(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
+    parser.add_argument("--config", default="configs/PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--diffusion_ckpt")
     parser.add_argument("--refiner_ckpt", required=True)
     parser.add_argument("--split", choices=("val", "test"), required=True)

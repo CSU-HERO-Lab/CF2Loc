@@ -32,10 +32,10 @@ The checkpoint is available from the
 
 | Dataset | Floorplan representation | Stage 1 | Stage 2 |
 | --- | --- | --- | --- |
-| Structured3D | grayscale | `PoseQueryDiffusion_S3D.yaml` | `PoseLocalRefiner_S3D_Dense.yaml` |
-| Structured3D | semantic one-hot | `PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml` | `PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml` |
-| ZInD | grayscale | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `PoseLocalRefiner_ZInD_MainDiffusion.yaml` |
-| ZInD | semantic one-hot | `PoseQueryDiffusion_ZInD_SemanticOneHot.yaml` | `PoseLocalRefiner_ZInD_SemanticOneHot_Dense.yaml` |
+| Structured3D | grayscale | `configs/PoseQueryDiffusion_S3D.yaml` | `configs/PoseLocalRefiner_S3D_Dense.yaml` |
+| Structured3D | semantic one-hot | `configs/PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml` | `configs/PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml` |
+| ZInD | grayscale | `configs/PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `configs/PoseLocalRefiner_ZInD_MainDiffusion.yaml` |
+| ZInD | semantic one-hot | `configs/PoseQueryDiffusion_ZInD_SemanticOneHot.yaml` | `configs/PoseLocalRefiner_ZInD_SemanticOneHot_Dense.yaml` |
 
 Non-semantic models use a single grayscale floorplan channel. Semantic models
 use hard one-hot floorplan labels. The default local refiner uses an oriented
@@ -47,14 +47,14 @@ Train the full-map diffusion model:
 
 ```bash
 python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_S3D.yaml
+  --config configs/PoseQueryDiffusion_S3D.yaml
 ```
 
 Train the local refiner with a frozen Stage-1 checkpoint:
 
 ```bash
 python training/train_pose_local_refiner.py \
-  --config PoseLocalRefiner_S3D_Dense.yaml \
+  --config configs/PoseLocalRefiner_S3D_Dense.yaml \
   --baseline_checkpoint_path /path/to/stage1.ckpt
 ```
 
@@ -68,7 +68,7 @@ Run the complete Structured3D test split:
 
 ```bash
 python eval/eval_pose_local_refiner.py \
-  --config PoseLocalRefiner_S3D_Dense.yaml \
+  --config configs/PoseLocalRefiner_S3D_Dense.yaml \
   --diffusion_ckpt checkpoints/release_s3d/s3d_no_sem_stage1_best.ckpt \
   --refiner_ckpt checkpoints/release_s3d/s3d_no_sem_dense_refiner_best.ckpt \
   --split test \

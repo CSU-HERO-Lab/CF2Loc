@@ -67,10 +67,10 @@ def test_diffusion_objective_is_noise_only():
 def test_main_configs_do_not_expose_reconstructed_pose_loss():
     root = Path(__file__).resolve().parents[1]
     expected_map_modes = {
-        "PoseQueryDiffusion_S3D.yaml": "gray",
-        "PoseQueryDiffusion_ZInD_MainDiffusion.yaml": "gray",
-        "PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml": "semantic_onehot",
-        "PoseQueryDiffusion_ZInD_SemanticOneHot.yaml": "semantic_onehot",
+        "configs/PoseQueryDiffusion_S3D.yaml": "gray",
+        "configs/PoseQueryDiffusion_ZInD_MainDiffusion.yaml": "gray",
+        "configs/PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml": "semantic_onehot",
+        "configs/PoseQueryDiffusion_ZInD_SemanticOneHot.yaml": "semantic_onehot",
     }
     for filename, expected_map_mode in expected_map_modes.items():
         config = yaml.safe_load((root / filename).read_text(encoding="utf-8"))

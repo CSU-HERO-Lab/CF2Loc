@@ -21,7 +21,7 @@ from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Export top-K refiner local-map crops.")
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
+    parser.add_argument("--config", default="configs/PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--diffusion_ckpt")
     parser.add_argument("--split", default="test")
     parser.add_argument("--scene", default="scene_03400")

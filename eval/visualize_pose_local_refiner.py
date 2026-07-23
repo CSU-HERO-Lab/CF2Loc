@@ -30,7 +30,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Visualize the two-stage dense local pose refiner."
     )
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
+    parser.add_argument("--config", default="configs/PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--diffusion_ckpt")
     parser.add_argument(
         "--refiner_ckpt",

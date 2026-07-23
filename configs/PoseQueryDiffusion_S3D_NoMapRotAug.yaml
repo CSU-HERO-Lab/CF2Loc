@@ -1,6 +1,7 @@
-# S3D non-semantic model reported in the paper.
-project_name: "cf2loc"
-run_name: "pose_query_diffusion_s3d_no_sem"
+# Structured3D map-rotation ablation. This matches the main S3D config except
+# that the floorplan and GT pose are not jointly rotated during training.
+project_name: "disco_model"
+run_name: "pose_query_diffusion_s3d_no_sem_no_map_rot_aug_seed42"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
@@ -53,8 +54,8 @@ datasets:
   floorplan_representation: "rgb"
   local_map_crop_size_meters: 5.0
   map_pose_rot_aug:
-    enable: true
-    p: 0.5
+    enable: false
+    p: 0.0
     angles: [90, 180, 270]
   hard_negative:
     mode: "none"

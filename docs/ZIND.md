@@ -28,5 +28,5 @@ Train the non-semantic model with:
 
 ```bash
 python training/train_pose_query_diffusion.py \
-  --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
+  --config configs/PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```

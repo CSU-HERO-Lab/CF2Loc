@@ -121,7 +121,7 @@ def main(config, ckpt_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="PoseLocalRefiner_S3D_Dense.yaml")
+    parser.add_argument("--config", default="configs/PoseLocalRefiner_S3D_Dense.yaml")
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")

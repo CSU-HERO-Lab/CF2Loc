@@ -1,22 +1,21 @@
+# Structured3D full-map diffusion with SemRayLoc-compatible floorplans.
+# Semantic floorplans are converted to hard one-hot channels:
+# free, wall, door/opening, window, other/background.
 project_name: "cf2loc"
-run_name: "pose_local_refiner_semrayloc_semantic_onehot_dense"
+run_name: "pose_query_diffusion_semrayloc_semantic_onehot"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
-epochs: 30
-batch_size: 16
-val_batch_size: 16
+epochs: 60
+batch_size: 8
+val_batch_size: 4
 num_workers: 4
 log_every_n_steps: 10
 precision: "32-true"
 gradient_clip_val: 1.0
 num_sanity_val_steps: 1
 
-# Used to initialize the frozen observation image encoder. Override this with
-# the matching semantic-onehot diffusion checkpoint for full semantic eval.
-baseline_checkpoint_path: "checkpoints/release_s3d/s3d_semantic_onehot_stage1_best.ckpt"
-
-# Frozen baseline image conditioning.
+# Image and full-map conditioning.
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
 image_encoder: "vits"
 freeze_image_backbone: true
@@ -31,9 +30,12 @@ diffusion_denoiser_layers: 2
 diffusion_num_heads: 4
 diffusion_dropout: 0.1
 diffusion_pose_fourier_bands: 4
-diffusion_coordinate_convention: "metric_cell_center_v1"
 
-# Baseline diffusion sampling used by eval.
+# Continuous pose diffusion. Use metric cell-center map coordinates and metric
+# relative pose-to-map features; this is the reproduced semantic S3D baseline.
+diffusion_coordinate_convention: "metric_cell_center_v1"
+diffusion_metric_relative_max_m: 20.0
+diffusion_metric_relative_scale_m: 5.0
 diffusion_train_steps: 1000
 diffusion_train_particles: 8
 diffusion_val_particles: 64
@@ -42,28 +44,7 @@ diffusion_theta_loss_weight: 1.0
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 
-# Local pose refiner.
-refiner_arch: "dense_heatmap"
-refiner_feature_dim: 128
-refiner_map_input_mode: "semantic_onehot"
-refiner_crop_size_meters: 5.0
-refiner_crop_output_size: 256
-refiner_max_delta_m: 1.5
-refiner_max_delta_theta_deg: 45.0
-refiner_map_context_blocks: 2
-refiner_num_heads: 4
-refiner_dropout: 0.1
-refiner_score_sigma_m: 0.5
-refiner_score_sigma_deg: 20.0
-refiner_delta_xy_loss_weight: 1.0
-refiner_delta_theta_loss_weight: 1.0
-refiner_score_loss_weight: 0.25
-refiner_dense_heatmap_loss_weight: 1.0
-refiner_dense_heatmap_sigma_m: 0.2
-refiner_dense_temperature: 1.0
-refiner_val_seed: 42
-
-# Optimizer.
+# Reproduced effective semantic baseline optimizer.
 lr: 1.0e-4
 min_lr: 1.0e-5
 weight_decay: 1.0e-4
@@ -76,7 +57,6 @@ datasets:
   val_split: "val"
   floorplan_img_size: [256, 256]
   floorplan_representation: "semantic_onehot"
-  refiner_floorplan_representation: "semantic_onehot"
   map_file: "floorplan_semantic.png"
   pose_file: "poses.txt"
   pose_in_meters: true

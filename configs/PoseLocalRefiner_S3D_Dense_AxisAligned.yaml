@@ -1,5 +1,6 @@
+# Axis-aligned crop ablation for the Structured3D refiner.
 project_name: "cf2loc"
-run_name: "pose_local_refiner_zind_no_sem_dense"
+run_name: "pose_local_refiner_s3d_dense_axis_aligned_seed42"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
@@ -12,8 +13,10 @@ precision: "32-true"
 gradient_clip_val: 1.0
 num_sanity_val_steps: 1
 
-baseline_checkpoint_path: "checkpoints/release_zind/zind_no_sem_stage1_best.ckpt"
+# Match the reported gray-only, no-clean S3D stage-1 baseline.
+baseline_checkpoint_path: "logs/pose_diffusion_runs/pose_query_diffusion_s3d_gray_no_clean/checkpoints/epoch=29-val_1m_recall=0.713-val_best_of_64_1m_recall=0.938_20260716_184025.ckpt"
 
+# Frozen first-stage observation encoder.
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"
 image_encoder: "vits"
 freeze_image_backbone: true
@@ -28,10 +31,8 @@ diffusion_denoiser_layers: 2
 diffusion_num_heads: 4
 diffusion_dropout: 0.1
 diffusion_pose_fourier_bands: 4
-diffusion_coordinate_convention: "metric_cell_center_v1"
-diffusion_metric_relative_max_m: 20.0
-diffusion_metric_relative_scale_m: 5.0
 
+# First-stage sampling settings used by end-to-end evaluation.
 diffusion_train_steps: 1000
 diffusion_train_particles: 8
 diffusion_val_particles: 64
@@ -40,6 +41,7 @@ diffusion_theta_loss_weight: 1.0
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0
 
+# Dense local pose refiner over an axis-aligned 5 m raster crop.
 refiner_arch: "dense_heatmap"
 refiner_feature_dim: 128
 refiner_map_input_mode: "gray"
@@ -65,17 +67,15 @@ min_lr: 1.0e-5
 weight_decay: 1.0e-4
 
 datasets:
-  dataset_type: "zind"
-  map_res: 0.01
-  data_folder: "datasets_zind/disco_floc"
-  data_splits: "datasets_zind/disco_floc/split.yaml"
+  dataset_type: "s3d"
+  map_res: 0.02
+  data_folder: "datasets_s3d/Structured3D"
+  data_splits: "datasets_s3d/Structured3D/split.yaml"
   val_split: "val"
-  val_subset_fraction: 0.1
-  val_subset_seed: 42
   floorplan_img_size: [256, 256]
   floorplan_representation: "rgb"
   refiner_floorplan_representation: "gray"
-  refiner_oriented_crop: true
+  refiner_oriented_crop: false
   local_map_crop_size_meters: 5.0
   map_pose_rot_aug:
     enable: true

@@ -119,7 +119,7 @@ def main(config, ckpt_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="PoseQueryDiffusion_S3D.yaml")
+    parser.add_argument("--config", default="configs/PoseQueryDiffusion_S3D.yaml")
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")
