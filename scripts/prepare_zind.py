@@ -440,10 +440,17 @@ def write_semrayloc_scene(raw_root, processed_scene_dir, output_root, args):
     scene_name = processed_scene_dir.name
     scene_dir = output_root / scene_name
     completion_marker = scene_dir / ".complete"
+    semantic_map_source = processed_scene_dir / "floorplan_semantic.png"
+
+    def copy_semantic_map():
+        if semantic_map_source.is_file():
+            shutil.copy2(semantic_map_source, scene_dir / "floorplan_semantic.png")
+
     if scene_dir.exists() and args.overwrite:
         shutil.rmtree(scene_dir)
     elif scene_dir.exists() and args.skip_existing:
         if completion_marker.is_file():
+            copy_semantic_map()
             return sum(
                 1
                 for line in (scene_dir / "poses_map.txt").read_text(
@@ -485,6 +492,7 @@ def write_semrayloc_scene(raw_root, processed_scene_dir, output_root, args):
     rgb_dir = scene_dir / "rgb"
     rgb_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(scene_dir / "map.png"), floor_map)
+    copy_semantic_map()
 
     offsets = ray_offsets(args.num_rays, args.fov)
     output_poses = []
