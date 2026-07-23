@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert raw ZInD tours into the DisCo-FLoc dataset layout."""
+"""Convert raw ZInD tours into the CF2Loc dataset layout."""
 
 import argparse
 import json

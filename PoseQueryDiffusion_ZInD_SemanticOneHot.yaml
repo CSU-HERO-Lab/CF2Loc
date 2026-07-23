@@ -1,5 +1,5 @@
 # ZInD semantic one-hot model reported in the paper.
-project_name: "disco_model"
+project_name: "cf2loc"
 run_name: "pose_query_diffusion_zind_semantic_onehot"
 use_wandb: true
 seed: 42
@@ -46,9 +46,9 @@ weight_decay: 1.0e-4
 datasets:
   dataset_type: "zind"
   map_res: 0.01
-  data_folder: "/home/ros/data/zind/disco_floc"
-  map_data_folder: "/home/ros/data/zind/processed"
-  data_splits: "/home/ros/data/zind/disco_floc/split.yaml"
+  data_folder: "datasets_zind/disco_floc"
+  map_data_folder: "datasets_zind/processed"
+  data_splits: "datasets_zind/disco_floc/split.yaml"
   val_split: "val"
   val_subset_fraction: 0.1
   val_subset_seed: 42

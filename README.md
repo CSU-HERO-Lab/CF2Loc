@@ -1,91 +1,110 @@
-# DisCo-FLoc: Using Dual-Level Visual-Geometric Contrasts to Disambiguate Depth-Aware Visual Floorplan Localization
+# CF2Loc
 
-<p align="center">
-    <a href="https://arxiv.org/abs/2601.01822"><img src="https://img.shields.io/badge/arXiv-2601.01822-b31b1b.svg"></a>
-    <a href="https://xiaowuguiovo.github.io/DisCo-FLoc_Project_Website/"><img src="https://img.shields.io/badge/Project-Website-blue.svg"></a>
-    <a href="https://arxiv.org/pdf/2601.01822.pdf"><img src="https://img.shields.io/badge/Paper-PDF-green.svg"></a>
-</p>
-
-<p align="center">
-    <strong>Ping Zhong, Shiyong Meng, Tao Zou, Bolei Chen*, Chaoxu Mu, Jianxin Wang</strong>
-    <br>
-</p>
+Official implementation of CF2Loc, a coarse-to-fine visual floorplan
+localization framework. CF2Loc first samples globally plausible camera poses
+with a full-map diffusion model, then applies a dense local refiner to the
+KDE-selected coarse pose.
 
 <div align="center">
-  <img src="assets/framework.png" width="100%">
+  <img src="assets/framework.png" width="100%" alt="CF2Loc framework">
 </div>
 
-This branch contains the current two-stage floorplan localization method: a
-full-map pose diffusion model followed by a dense local pose refiner.
+## Installation
 
-## Environment Setup
+Python 3.8 or newer is recommended.
 
-1.  **Prerequisites**: Ensure you have Python installed (recommended version >= 3.8).
-2.  **Install Dependencies**: Run the following command to install the required Python libraries:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+Download the Depth Anything V2 ViT-S checkpoint to:
 
-## Pretrained Backbone
+```text
+checkpoints/depth_anything_v2_vits.pth
+```
 
-You need the **Depth Anything V2** checkpoint (ViT-S version).
+The checkpoint is available from the
+[Depth Anything V2 repository](https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth).
 
-* **Location**: `checkpoints/depth_anything_v2_vits.pth`
-* **Download**: Download the `depth_anything_v2_vits.pth` from [**[HERE]**](https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth).
+## Configurations
 
-## Canonical Configurations
-
-| Dataset | Floorplan | Stage 1 | Stage 2 |
+| Dataset | Floorplan representation | Stage 1 | Stage 2 |
 | --- | --- | --- | --- |
-| S3D | non-semantic gray | `PoseQueryDiffusion_S3D.yaml` | `PoseLocalRefiner_S3D_Dense.yaml` |
-| S3D | semantic one-hot | `PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml` | `PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml` |
-| ZInD | non-semantic gray | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `PoseLocalRefiner_ZInD_MainDiffusion.yaml` |
-| ZInD | semantic one-hot | `PoseQueryDiffusion_ZInD_SemanticOneHot.yaml` | not reported |
+| Structured3D | grayscale | `PoseQueryDiffusion_S3D.yaml` | `PoseLocalRefiner_S3D_Dense.yaml` |
+| Structured3D | semantic one-hot | `PoseQueryDiffusion_SemRayLoc_SemanticOneHot.yaml` | `PoseLocalRefiner_SemRayLoc_SemanticOneHot_Dense.yaml` |
+| ZInD | grayscale | `PoseQueryDiffusion_ZInD_MainDiffusion.yaml` | `PoseLocalRefiner_ZInD_MainDiffusion.yaml` |
+| ZInD | semantic one-hot | `PoseQueryDiffusion_ZInD_SemanticOneHot.yaml` | `PoseLocalRefiner_ZInD_SemanticOneHot_Dense.yaml` |
 
-S3D and ZInD non-semantic stage-1 models use one grayscale channel. Semantic
-models use five hard one-hot channels. All stage-1 models use the standard
-noise-prediction diffusion objective without a reconstructed-pose auxiliary
-loss. Semantic stage-1 models train for 60 epochs; non-semantic stage-1 models
-and all local refiners train for 30 epochs.
+Non-semantic models use a single grayscale floorplan channel. Semantic models
+use hard one-hot floorplan labels. The default local refiner uses an oriented
+`5 m x 5 m` grayscale crop without additional edge channels.
 
 ## Training
 
-Train stage 1 and then pass its best checkpoint to the stage-2 configuration:
+Train the full-map diffusion model:
 
 ```bash
-python training/train_pose_query_diffusion.py --config PoseQueryDiffusion_S3D.yaml
+python training/train_pose_query_diffusion.py \
+  --config PoseQueryDiffusion_S3D.yaml
+```
+
+Train the local refiner with a frozen Stage-1 checkpoint:
+
+```bash
 python training/train_pose_local_refiner.py \
   --config PoseLocalRefiner_S3D_Dense.yaml \
   --baseline_checkpoint_path /path/to/stage1.ckpt
 ```
 
-Use the corresponding semantic or ZInD configuration from the table above to
-switch datasets and floorplan representations.
+Use the corresponding configuration from the table to switch datasets or
+floorplan representations. Non-semantic Stage-1 models and local refiners train
+for 30 epochs. Semantic Stage-1 models train for 60 epochs.
 
 ## Evaluation
+
+Run the complete Structured3D test split:
 
 ```bash
 python eval/eval_pose_local_refiner.py \
   --config PoseLocalRefiner_S3D_Dense.yaml \
   --diffusion_ckpt checkpoints/release_s3d/s3d_no_sem_stage1_best.ckpt \
   --refiner_ckpt checkpoints/release_s3d/s3d_no_sem_dense_refiner_best.ckpt \
-  --split test
+  --split test \
+  --seed 0 \
+  --val_particles 64 \
+  --sample_steps 20 \
+  --top_k 1 \
+  --pose_selection kde \
+  --cache_refiner_image
 ```
 
-Evaluation refines only the KDE-selected pose by default. Pass `--top_k 8`
-explicitly to run the slower candidate-quality reranking ablation.
+Stage-1 sampling caches map-attention projections across denoising steps.
+Evaluation refines the KDE-selected pose by default. Pass `--top_k 8` only for
+the candidate-quality reranking ablation.
 
-Release checkpoint manifests are stored under `checkpoints/release_s3d` and
-`checkpoints/release_zind`. Verify all checkpoints against the current code with:
+## Checkpoints
+
+Checkpoint binaries are not stored in Git. Expected filenames and SHA-256
+hashes are documented in:
+
+- `checkpoints/release_s3d/manifest.json`
+- `checkpoints/release_zind/manifest.json`
+
+After placing the files at the paths listed in `checkpoints/README.md`, verify
+that every model loads strictly with its release configuration:
 
 ```bash
 python scripts/check_release_checkpoints.py
 ```
 
-Run unit tests with third-party pytest plugin auto-loading disabled when the
-shell inherits a ROS environment:
+## Tests
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
 ```
+
+## License
+
+This project is released under the MIT License.

@@ -1,4 +1,4 @@
-project_name: "disco_model"
+project_name: "cf2loc"
 run_name: "pose_local_refiner_semrayloc_semantic_onehot_dense"
 use_wandb: true
 seed: 42
@@ -71,7 +71,7 @@ weight_decay: 1.0e-4
 datasets:
   dataset_type: "semrayloc"
   map_res: 0.01
-  data_folder: "/home/ros/data/semrayloc_processed_floorplans"
+  data_folder: "datasets_semrayloc/processed"
   data_splits: "datasets_semrayloc/split.yaml"
   val_split: "val"
   floorplan_img_size: [256, 256]

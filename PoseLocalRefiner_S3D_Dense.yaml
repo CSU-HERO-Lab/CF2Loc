@@ -1,5 +1,5 @@
-project_name: "disco_model"
-run_name: "pose_local_refiner_s3d_dense_baseline"
+project_name: "cf2loc"
+run_name: "pose_local_refiner_s3d_dense_gray_crop5m_seed42"
 use_wandb: true
 seed: 42
 gpu_ids: [0]
@@ -42,7 +42,7 @@ diffusion_mode_sigma_deg: 20.0
 # Dense local pose refiner over the oriented 5 m raster crop.
 refiner_arch: "dense_heatmap"
 refiner_feature_dim: 128
-refiner_map_input_mode: "gray_edges"
+refiner_map_input_mode: "gray"
 refiner_crop_size_meters: 5.0
 refiner_crop_output_size: 256
 refiner_max_delta_m: 1.5

@@ -1,0 +1,56 @@
+{
+  "dataset": "ZInD",
+  "selection_split": "val",
+  "final_evaluation_split": "test",
+  "checkpoints": [
+    {
+      "name": "zind_no_sem_stage1_best.ckpt",
+      "stage": "stage1_diffusion",
+      "floorplan": "non_semantic_gray",
+      "config": "PoseQueryDiffusion_ZInD_MainDiffusion.yaml",
+      "source_epoch": 24,
+      "test_0.1m_recall": 0.0322,
+      "test_0.5m_recall": 0.3644,
+      "test_1m_recall": 0.5554,
+      "test_1m_30deg_recall": 0.4457,
+      "sha256": "0a212a3b7df9a248a021b34b3b92bce89b3a45186a8ae89d65b2be1222308672"
+    },
+    {
+      "name": "zind_no_sem_dense_refiner_best.ckpt",
+      "stage": "stage2_dense_refiner",
+      "floorplan": "non_semantic_gray",
+      "config": "PoseLocalRefiner_ZInD_MainDiffusion.yaml",
+      "source_epoch": 24,
+      "test_0.1m_recall": 0.0974,
+      "test_0.5m_recall": 0.4554,
+      "test_1m_recall": 0.5728,
+      "test_1m_30deg_recall": 0.4586,
+      "sha256": "07db3dff318e03e9cae12fc733daead5986b9d9208baac3a55267628ed2b6422"
+    },
+    {
+      "name": "zind_semantic_onehot_stage1_best.ckpt",
+      "stage": "stage1_diffusion",
+      "floorplan": "semantic_onehot",
+      "config": "PoseQueryDiffusion_ZInD_SemanticOneHot.yaml",
+      "source_epoch": 27,
+      "test_0.1m_recall": 0.0425,
+      "test_0.5m_recall": 0.4344,
+      "test_1m_recall": 0.6193,
+      "test_1m_30deg_recall": 0.5387,
+      "sha256": "ea356d440a844641b9ce4d225c04d2dd753306524d69044463bf7da62835ebdf"
+    },
+    {
+      "name": "zind_semantic_onehot_dense_refiner_best.ckpt",
+      "stage": "stage2_dense_refiner",
+      "floorplan": "semantic_onehot",
+      "config": "PoseLocalRefiner_ZInD_SemanticOneHot_Dense.yaml",
+      "source_epoch": 25,
+      "val_refined_0.5m_recall": 0.7559576631,
+      "test_0.1m_recall": 0.1149,
+      "test_0.5m_recall": 0.5174,
+      "test_1m_recall": 0.6322,
+      "test_1m_30deg_recall": 0.5471,
+      "sha256": "9545cd0c4bbbf5881d1d88860f77e725c0c3f17fd6d760fa1d9adbabc572a885"
+    }
+  ]
+}

@@ -55,7 +55,7 @@ def main():
     parser.add_argument("--data-folder", required=True, type=Path)
     parser.add_argument(
         "--reference-split",
-        default=Path("/home/ros/data/DisCo-FLoc/datasets_s3d/Structured3D/split.yaml"),
+        default=Path("datasets_s3d/Structured3D/split.yaml"),
         type=Path,
         help="S3D baseline split to mirror by scene id.",
     )

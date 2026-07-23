@@ -1,13 +1,10 @@
-# ZInD for DisCo-FLoc
+# ZInD Preparation
 
-This branch keeps the `e781938` S3D pose-query diffusion architecture unchanged
-and converts SemRayLoc-compatible ZInD raw data into the localizer's existing
-scene layout.
-
-The expected raw data is the extracted archive layout:
+The ZInD converter consumes raw panoramas and SemRayLoc-compatible processed
+floorplans:
 
 ```text
-/home/ros/data/zind/
+datasets_zind/
   raw_data/<home-id>/zind_data.json
   raw_data/<home-id>/panos/*.jpg
   processed/<scene>/floorplan_walls_only.png
@@ -16,24 +13,20 @@ The expected raw data is the extracted archive layout:
   processed/split.yaml
 ```
 
-The SemRayLoc-aligned converter reuses its 1 cm/pixel wall map, poses, and
-home-disjoint split. It produces four 80-degree views per panorama, writes
-their map-pixel poses to `poses_map.txt`, and raycasts matching 40-value depth
-targets to `depth40.txt`.
-
-Convert with SemRayLoc's existing split so homes cannot cross splits:
+It reuses the home-disjoint split, renders four 80-degree perspective views
+per panorama, writes map-pixel poses, and creates matching 40-ray depth files.
 
 ```bash
-.venv/bin/python scripts/prepare_zind.py \
-  --raw-root /home/ros/data/zind/raw_data \
-  --output-root /home/ros/data/zind/disco_floc \
-  --semrayloc-processed-root /home/ros/data/zind/processed \
+python scripts/prepare_zind.py \
+  --raw-root datasets_zind/raw_data \
+  --output-root datasets_zind/disco_floc \
+  --semrayloc-processed-root datasets_zind/processed \
   --skip-existing
 ```
 
-Then train with:
+Train the non-semantic model with:
 
 ```bash
-.venv/bin/python training/train_pose_query_diffusion.py \
+python training/train_pose_query_diffusion.py \
   --config PoseQueryDiffusion_ZInD_MainDiffusion.yaml
 ```

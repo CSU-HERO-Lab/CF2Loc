@@ -24,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark batch-one RRP latency.")
     parser.add_argument(
         "--checkpoint",
-        default="/home/ros/meng/DisCo-FLoc/checkpoints/RRP_s3d_best.ckpt",
+        default="checkpoints/RRP_s3d_best.ckpt",
     )
     parser.add_argument("--dataset", default="datasets_s3d/Structured3D")
     parser.add_argument("--desdf", default="datasets_s3d/desdf")

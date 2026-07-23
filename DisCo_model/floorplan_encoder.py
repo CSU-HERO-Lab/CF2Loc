@@ -32,7 +32,7 @@ class ResNetFloorplanEncoder(nn.Module):
     def __init__(
         self,
         feature_dim: int = 64,
-        input_mode: str = "gray_edges",
+        input_mode: str = "gray",
         context_blocks: int = 1,
         pretrained: bool = False,
     ):
@@ -92,7 +92,6 @@ class ResNetFloorplanEncoder(nn.Module):
             floorplan_img = floorplan_img.mean(dim=1, keepdim=True)
         floorplan_img = floorplan_img.float()
         if self.input_mode == "gray_edges":
-            # Required by the released S3D non-semantic checkpoints.
             grad_x = F.conv2d(floorplan_img, self.sobel_x, padding=1)
             grad_y = F.conv2d(floorplan_img, self.sobel_y, padding=1)
             floorplan_img = torch.cat([floorplan_img, grad_x, grad_y], dim=1)

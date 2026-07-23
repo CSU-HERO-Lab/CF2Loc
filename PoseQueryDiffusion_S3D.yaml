@@ -1,5 +1,5 @@
 # S3D non-semantic model reported in the paper.
-project_name: "disco_model"
+project_name: "cf2loc"
 run_name: "pose_query_diffusion_s3d_no_sem"
 use_wandb: true
 seed: 42
