@@ -5,10 +5,6 @@ localization framework. CF2Loc first samples globally plausible camera poses
 with a full-map diffusion model, then applies a dense local refiner to the
 KDE-selected coarse pose.
 
-<div align="center">
-  <img src="assets/framework.png" width="100%" alt="CF2Loc framework">
-</div>
-
 ## Installation
 
 Python 3.8 or newer is recommended.
