@@ -75,33 +75,9 @@ python eval/eval_pose_local_refiner.py \
   --split test
 ```
 
-Stage-1 sampling caches map-attention projections across denoising steps. The
-evaluator also caches observation features for the local refiner. By default it
-refines the KDE mode only; `--top-k K` refines the K densest particles and uses
-the learned candidate score to select the final pose.
-
-### Evaluation protocol
-
-Training scripts reject `datasets.val_split: test`. Checkpoints and
-hyperparameters must be selected on the validation split, while paper results
-must be produced with the explicit `--split test` argument. During inference,
-the Stage-1 pose is selected solely from the sampled-pose KDE density and the
-optional top-K refiner uses only its learned candidate score. Ground-truth
-poses are read after prediction for metric computation only. The
-`val_best_of_*` values logged during Stage-1 training are oracle diagnostics;
-they are not used to form the reported final pose or select the release
-checkpoint.
-
 ## Checkpoints
 
-Checkpoint binaries are not stored in Git. Expected filenames and SHA-256
-hashes are documented in:
-
-- `checkpoints/release_s3d/manifest.json`
-- `checkpoints/release_zind/manifest.json`
-
-After placing the files at the paths listed in `checkpoints/README.md`, verify
-that every model loads strictly with its release configuration:
+See [`checkpoints/README.md`](checkpoints/README.md) for checkpoint paths.
 
 ```bash
 python scripts/check_release_checkpoints.py
