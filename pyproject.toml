@@ -1,3 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.ruff]
 exclude = ["DisCo_model/depth_anything_v2"]
 

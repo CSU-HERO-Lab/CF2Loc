@@ -54,13 +54,13 @@ Train the local refiner with a frozen Stage-1 checkpoint:
 
 ```bash
 python training/train_pose_local_refiner.py \
-  --config configs/PoseLocalRefiner_S3D_Dense.yaml \
-  --baseline_checkpoint_path /path/to/stage1.ckpt
+  --config configs/PoseLocalRefiner_S3D_Dense.yaml
 ```
 
 Use the corresponding configuration from the table to switch datasets or
-floorplan representations. Non-semantic Stage-1 models and local refiners train
-for 30 epochs. Semantic Stage-1 models train for 60 epochs.
+floorplan representations. Each refiner configuration specifies its frozen
+Stage-1 checkpoint. Non-semantic Stage-1 models and local refiners train for
+30 epochs. Semantic Stage-1 models train for 60 epochs.
 
 ## Evaluation
 
@@ -69,20 +69,14 @@ Run the complete Structured3D test split:
 ```bash
 python eval/eval_pose_local_refiner.py \
   --config configs/PoseLocalRefiner_S3D_Dense.yaml \
-  --diffusion_ckpt checkpoints/release_s3d/s3d_no_sem_stage1_best.ckpt \
-  --refiner_ckpt checkpoints/release_s3d/s3d_no_sem_dense_refiner_best.ckpt \
-  --split test \
-  --seed 0 \
-  --val_particles 64 \
-  --sample_steps 20 \
-  --top_k 1 \
-  --pose_selection kde \
-  --cache_refiner_image
+  --refiner-ckpt checkpoints/release_s3d/s3d_no_sem_dense_refiner_best.ckpt \
+  --split test
 ```
 
-Stage-1 sampling caches map-attention projections across denoising steps.
-Evaluation refines the KDE-selected pose by default. Pass `--top_k 8` only for
-the candidate-quality reranking ablation.
+Stage-1 sampling caches map-attention projections across denoising steps. The
+evaluator also caches observation features for the local refiner. By default it
+refines the KDE mode only; `--top-k K` refines the K densest particles and uses
+the learned candidate score to select the final pose.
 
 ### Evaluation protocol
 
@@ -114,8 +108,8 @@ python scripts/check_release_checkpoints.py
 ## Tests
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
-python -m ruff check .
+pytest -q
+ruff check .
 ```
 
 ## License
