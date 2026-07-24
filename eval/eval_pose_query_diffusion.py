@@ -38,14 +38,6 @@ def parse_args():
         choices=("kde", "mean"),
         default="kde",
     )
-    parser.add_argument(
-        "--flip-target-map-vertical",
-        action="store_true",
-        help=(
-            "Express the target map and GT pose in a vertically reflected map "
-            "frame before inference. The observation image is unchanged."
-        ),
-    )
     parser.add_argument("--output-json")
     return parser.parse_args()
 
@@ -88,37 +80,6 @@ def pose_sample_mean(pose_samples):
     return torch.cat([xy, theta.unsqueeze(-1)], dim=-1)
 
 
-def summarize_angle_offset_sweep(xy_errors, theta_deltas):
-    xy_errors = torch.cat(xy_errors)
-    theta_deltas = torch.cat(theta_deltas)
-    recalls = {}
-    for offset_deg in range(-180, 180, 5):
-        corrected_error = torch.abs(
-            torch.remainder(
-                theta_deltas - math.radians(offset_deg) + math.pi,
-                2.0 * math.pi,
-            )
-            - math.pi
-        )
-        recall = float(
-            (
-                (xy_errors <= 1.0)
-                & (corrected_error <= math.radians(30.0))
-            )
-            .float()
-            .mean()
-        )
-        recalls[offset_deg] = recall
-    best_offset = max(recalls, key=recalls.get)
-    return {
-        "best_global_angle_offset_deg": int(best_offset),
-        "best_offset_1m_30deg_recall": recalls[best_offset],
-        "quarter_turn_1m_30deg_recall": {
-            str(offset): recalls[offset] for offset in (-180, -90, 0, 90)
-        },
-    }
-
-
 def main():
     args = parse_args()
     with open(args.config, "r", encoding="utf-8") as config_file:
@@ -151,6 +112,8 @@ def main():
     subset_indices = None
     if args.max_samples is not None and args.subset_fraction is not None:
         raise ValueError("Use either --max-samples or --subset-fraction, not both.")
+    if args.max_samples is not None and args.max_samples < 1:
+        raise ValueError("--max-samples must be positive.")
     if args.subset_fraction is not None:
         if not 0.0 < args.subset_fraction <= 1.0:
             raise ValueError("--subset-fraction must be in (0, 1].")
@@ -186,7 +149,6 @@ def main():
 
     xy_errors = []
     theta_errors = []
-    theta_deltas = []
     with torch.inference_mode():
         for batch in tqdm(loader, desc=f"eval_{split}"):
             obs_img, gt_pose, _ray, floorplan_img, wh, *_ = batch
@@ -194,14 +156,6 @@ def main():
             gt_pose = gt_pose.to(device, non_blocking=True)
             floorplan_img = floorplan_img.to(device, non_blocking=True)
             wh = wh.to(device, non_blocking=True)
-            if args.flip_target_map_vertical:
-                floorplan_img = torch.flip(floorplan_img, dims=(-2,))
-                gt_pose = gt_pose.clone()
-                gt_pose[:, 1] = wh[:, 1] - 1.0 - gt_pose[:, 1]
-                gt_pose[:, 2] = torch.remainder(
-                    -gt_pose[:, 2],
-                    2.0 * math.pi,
-                )
 
             map_tokens, map_coordinates, image_global = model.condition_encoder(
                 obs_img,
@@ -222,13 +176,8 @@ def main():
                 selected_pose[:, :2] - gt_pose[:, :2], dim=-1
             ) * model.map_res
             theta_error = model.angular_error(selected_pose[:, 2], gt_pose[:, 2])
-            theta_delta = torch.remainder(
-                selected_pose[:, 2] - gt_pose[:, 2] + math.pi,
-                2.0 * math.pi,
-            ) - math.pi
             xy_errors.append(xy_error.cpu())
             theta_errors.append(theta_error.cpu())
-            theta_deltas.append(theta_delta.cpu())
 
     metrics = summarize(xy_errors, theta_errors)
     result = {
@@ -242,17 +191,12 @@ def main():
         "target_total_samples": total_samples,
         "subset_fraction": args.subset_fraction,
         "subset_seed": args.subset_seed if args.subset_fraction is not None else None,
-        "flip_target_map_vertical": args.flip_target_map_vertical,
         "subset_indices_sha256": (
             hashlib.sha256(
                 np.asarray(subset_indices, dtype=np.int64).tobytes()
             ).hexdigest()
             if subset_indices is not None
             else None
-        ),
-        "angle_offset_diagnostic": summarize_angle_offset_sweep(
-            xy_errors,
-            theta_deltas,
         ),
         **metrics,
     }

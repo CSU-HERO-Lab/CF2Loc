@@ -5,7 +5,6 @@ import os
 import sys
 from pathlib import Path
 
-import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -67,7 +66,11 @@ def draw_pose(ax, pose, color, label, length=30.0):
 
 
 def align_map_input_mode_with_checkpoint(config, checkpoint_path):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
     state_dict = checkpoint.get("state_dict", checkpoint)
     weight = state_dict["condition_encoder.map_encoder.conv1.weight"]
     channels_to_mode = {1: "gray", 3: "gray_edges", 5: "semantic_onehot"}

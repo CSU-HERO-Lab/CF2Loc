@@ -55,10 +55,16 @@ def build_validation_subset(dataset, dataset_cfg):
 def main(config, ckpt_path=None):
     pl.seed_everything(int(config.get("seed", 42)), workers=True)
     num_workers = int(config.get("num_workers", 4))
+    val_split = config["datasets"].get("val_split", "val")
+    if val_split == "test":
+        raise ValueError(
+            "Training may not use the test split for model selection. "
+            "Set datasets.val_split to 'val'."
+        )
     train_dataset = build_dataset(config, split="train", deterministic=False)
     val_dataset = build_dataset(
         config,
-        split=config["datasets"].get("val_split", "val"),
+        split=val_split,
         deterministic=True,
     )
     val_dataset = build_validation_subset(val_dataset, config["datasets"])

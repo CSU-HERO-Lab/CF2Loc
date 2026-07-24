@@ -11,7 +11,7 @@
       "source_run": "pose_query_diffusion_s3d_gray_no_clean",
       "source_epoch": 29,
       "selection_metric": "val_1m_recall",
-      "selection_value": 0.7127564549,
+      "selection_value": 0.7127564549446106,
       "sha256": "d01e891fb49678b5db71c96f9c5b06c8b7a873ef03573552e0575546d436a37a"
     },
     {
@@ -22,11 +22,7 @@
       "source_run": "pose_local_refiner_s3d_dense_gray_crop5m_seed42",
       "source_epoch": 29,
       "selection_metric": "val_refined_0.5m_recall",
-      "selection_value": 0.8224799037,
-      "test_0.1m_recall": 0.115691,
-      "test_0.5m_recall": 0.640906,
-      "test_1m_recall": 0.736300,
-      "test_1m_30deg_recall": 0.726151,
+      "selection_value": 0.8224799036979675,
       "sha256": "0710d49e9b052b7f84cc54722bea81b77297e90e060102d64a3d54c7319c8945"
     },
     {
@@ -37,7 +33,7 @@
       "source_run": "pose_query_diffusion_semrayloc_semantic_onehot_metric_coords_repro",
       "source_epoch": 50,
       "selection_metric": "val_1m_recall",
-      "selection_value": 0.7572,
+      "selection_value": 0.7572108507156372,
       "sha256": "06da331aebaea4cff5e97b11aafea17fd0dc6c24c51acf4afea85f9bc6b317fd"
     },
     {
@@ -48,7 +44,7 @@
       "source_run": "pose_local_refiner_semrayloc_semantic_onehot_dense",
       "source_epoch": 29,
       "selection_metric": "val_refined_0.5m_recall",
-      "selection_value_rounded": 0.842,
+      "selection_value": 0.841510534286499,
       "sha256": "76a6d6b6c9d487168363b8bb0eb147847d65988fa711192a1b092c35298dce28"
     }
   ]

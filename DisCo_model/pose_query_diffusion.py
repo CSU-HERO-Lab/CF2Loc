@@ -831,6 +831,10 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
             map_coordinates,
             image_global,
         )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite {stage} diffusion loss: {loss.detach().item()}"
+            )
         batch_size = obs_img.shape[0]
         self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=batch_size)
         for name, value in loss_parts.items():

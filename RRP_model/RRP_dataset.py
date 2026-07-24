@@ -1,8 +1,8 @@
 import os
+import warnings
 from pathlib import Path
 from typing import Tuple
 
-import cv2
 import torch
 import yaml
 from PIL import Image
@@ -33,8 +33,19 @@ class RRP_Dataset(Dataset):
         with open(self.data_splits_path, "r", encoding="utf-8") as f:
             data_splits = yaml.safe_load(f)
 
+        if not isinstance(data_splits, dict) or self.split not in data_splits:
+            raise KeyError(
+                f"Split '{self.split}' is not defined in '{self.data_splits_path}'."
+            )
         self.data_split = ["".join(x.split()) for x in data_splits[self.split]]
+        if len(self.data_split) != len(set(self.data_split)):
+            raise ValueError(
+                f"Split '{self.split}' contains duplicate scenes in "
+                f"'{self.data_splits_path}'."
+            )
         self.data = self._load_data(self.data_folder, self.data_split)
+        if not self.data:
+            raise RuntimeError(f"No RRP samples were loaded for split '{self.split}'.")
 
     def _scene_format(self, scene_dir):
         if self.dataset_type in ("s3d", "structured3d"):
@@ -85,17 +96,37 @@ class RRP_Dataset(Dataset):
 
     def _load_data(self, data_folder, data_split):
         data = []
+        missing_scenes = []
         for scene in data_split:
             cur_dir = os.path.join(data_folder, scene)
-            if not os.path.exists(cur_dir):
-                print(f"Warning: {cur_dir} does not exist, skipping.")
+            if not os.path.isdir(cur_dir):
+                missing_scenes.append(scene)
                 continue
 
             scene_format = self._scene_format(cur_dir)
             map_path = os.path.join(cur_dir, "map.png")
             pose_path = os.path.join(cur_dir, scene_format["pose_file"])
-            depth_path = os.path.join(cur_dir, self.dataset_cfg.get("depth_file", "depth40.txt"))
+            depth_path = os.path.join(
+                cur_dir,
+                self.dataset_cfg.get("depth_file", "depth40.txt"),
+            )
             rgb_dir = os.path.join(cur_dir, scene_format["rgb_dir"])
+            required_paths = {
+                "floorplan": map_path,
+                "pose file": pose_path,
+                "depth file": depth_path,
+                "RGB directory": rgb_dir,
+            }
+            for path_type, path in required_paths.items():
+                exists = (
+                    os.path.isdir(path)
+                    if path_type.endswith("directory")
+                    else os.path.isfile(path)
+                )
+                if not exists:
+                    raise FileNotFoundError(
+                        f"Scene '{scene}' is missing its {path_type}: '{path}'."
+                    )
 
             pose_data = [
                 list(map(float, line.split()))[:3]
@@ -122,8 +153,17 @@ class RRP_Dataset(Dataset):
                 key=self._sort_key,
             )
 
-            sample_count = min(len(files), len(pose_data), len(ray_data))
-            for n in range(sample_count):
+            counts = (len(files), len(pose_data), len(ray_data))
+            if len(set(counts)) != 1:
+                raise ValueError(
+                    f"Scene '{scene}' has mismatched sample counts: "
+                    f"RGB images={counts[0]}, poses={counts[1]}, "
+                    f"depth rows={counts[2]}."
+                )
+            if not files:
+                raise ValueError(f"Scene '{scene}' contains no samples.")
+
+            for n in range(len(files)):
                 data.append(
                     {
                         "rgb_image": str(files[n]),
@@ -132,26 +172,26 @@ class RRP_Dataset(Dataset):
                         "ray": ray_data[n],
                     }
                 )
+        if missing_scenes:
+            examples = ", ".join(missing_scenes[:5])
+            suffix = "" if len(missing_scenes) <= 5 else ", ..."
+            warnings.warn(
+                f"RRP split '{self.split}' lists {len(missing_scenes)} scene "
+                f"directories that are unavailable under '{data_folder}'. "
+                f"They were excluded: {examples}{suffix}",
+                RuntimeWarning,
+            )
         return data
 
     def _load_image(self, image_path, target_size):
-        try:
-            with open(image_path, "rb") as f:
-                return img_path_to_data(f, target_size)
-        except TypeError:
-            print(f"Failed to load image {image_path}")
-            return torch.zeros((3, target_size[1], target_size[0]), dtype=torch.float32)
-
-    def _load_floorplan(self, floorplan_path):
-        floorplan_img = cv2.imread(floorplan_path, 0)
-        return floorplan_img
+        with open(image_path, "rb") as image_file:
+            return img_path_to_data(image_file, target_size)
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
         data = self.data[i]
-        rgb_image = Image.open(data["rgb_image"])
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -160,14 +200,18 @@ class RRP_Dataset(Dataset):
                 ),
             ]
         )
-        rgb_image = transform(rgb_image)
+        with Image.open(data["rgb_image"]) as image:
+            rgb_image = transform(image.convert("RGB"))
 
         pose = torch.tensor(data["pose"])
         ray = torch.tensor(data["ray"])
 
-        w, h = Image.open(data["floorplan_image"]).size
+        with Image.open(data["floorplan_image"]) as image:
+            w, h = image.size
         wh_tensor = torch.tensor([w, h], dtype=torch.float32)
-        floorplan_img = self._load_image(data["floorplan_image"], self.floorplan_img_size)
+        floorplan_img = self._load_image(
+            data["floorplan_image"], self.floorplan_img_size
+        )
 
         return (
             torch.as_tensor(rgb_image, dtype=torch.float32),
@@ -176,14 +220,3 @@ class RRP_Dataset(Dataset):
             torch.as_tensor(floorplan_img, dtype=torch.float32),
             torch.as_tensor(wh_tensor, dtype=torch.float32),
         )
-
-
-if __name__ == "__main__":
-    dataset = RRP_Dataset(
-        data_folder="datasets_s3d/Structured3D",
-        data_splits_path="datasets_s3d/Structured3D/split.yaml",
-        split="train",
-        rgb_image_size=(640, 480),
-        floorplan_img_size=(256, 256),
-    )
-    print(len(dataset))

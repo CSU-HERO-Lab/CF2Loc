@@ -1,37 +1,39 @@
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-import yaml
 from RRP_model.RRP_dataset import RRP_Dataset
 
+
 class RRPDataModule(pl.LightningDataModule):
-    def __init__(self, data_config: dict, batch_size: int, num_workers: int, eval_batch_size: int = None):
+    def __init__(
+        self,
+        data_config: dict,
+        batch_size: int,
+        num_workers: int,
+        eval_batch_size: int = None,
+    ):
         super().__init__()
         self.data_config = data_config
         self.batch_size = batch_size
-        self.eval_batch_size = eval_batch_size if eval_batch_size is not None else batch_size
+        self.eval_batch_size = (
+            eval_batch_size if eval_batch_size is not None else batch_size
+        )
         self.num_workers = num_workers
-        
+
         self.train_dataset = None
         self.val_dataset = None
 
     def _resolve_val_split(self):
         requested_split = self.data_config.get("val_split", "val")
-        with open(self.data_config["data_splits"], "r", encoding="utf-8") as f:
-            available_splits = yaml.safe_load(f) or {}
-
-        if requested_split in available_splits:
-            return requested_split
-        if "test" in available_splits:
-            print(f"[WARN] Requested val split '{requested_split}' not found; fallback to 'test'.")
-            return "test"
-        raise ValueError(
-            f"Validation split '{requested_split}' not found in {self.data_config['data_splits']}. "
-            f"Available splits: {list(available_splits.keys())}"
-        )
+        if requested_split == "test":
+            raise ValueError(
+                "RRP training may not use the test split for model selection. "
+                "Set datasets.val_split to 'val'."
+            )
+        return requested_split
 
     def setup(self, stage: str = None):
         # Assign train/val datasets for use in dataloaders
-        if stage == 'fit' or stage is None:
+        if stage == "fit" or stage is None:
             val_split = self._resolve_val_split()
 
             self.train_dataset = RRP_Dataset(

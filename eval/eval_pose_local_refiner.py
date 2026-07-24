@@ -4,7 +4,6 @@ import math
 import os
 import sys
 
-import cv2
 import numpy as np
 import torch
 import yaml
@@ -287,6 +286,14 @@ def main():
     args = parser.parse_args()
     if args.top_k < 1:
         parser.error("--top_k must be at least 1")
+    if not 0.0 < args.subset_fraction <= 1.0:
+        parser.error("--subset_fraction must be in (0, 1]")
+    if args.max_samples is not None and args.max_samples < 1:
+        parser.error("--max_samples must be positive")
+    if args.refine_iters < 1:
+        parser.error("--refine_iters must be at least 1")
+    if args.delta_scale <= 0.0:
+        parser.error("--delta_scale must be positive")
 
     with open(args.config, "r", encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
@@ -317,6 +324,8 @@ def main():
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = DisCo_Dataset(
@@ -516,6 +525,8 @@ def main():
     )
     print(json.dumps(results, indent=2))
     if args.output_json:
+        output_dir = os.path.dirname(os.path.abspath(args.output_json))
+        os.makedirs(output_dir, exist_ok=True)
         with open(args.output_json, "w", encoding="utf-8") as output_file:
             json.dump(results, output_file, indent=2)
 

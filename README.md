@@ -7,7 +7,7 @@ KDE-selected coarse pose.
 
 ## Installation
 
-Python 3.8 or newer is recommended.
+The release environment is tested with Python 3.8.
 
 ```bash
 python -m venv .venv
@@ -23,6 +23,10 @@ checkpoints/depth_anything_v2_vits.pth
 
 The checkpoint is available from the
 [Depth Anything V2 repository](https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth).
+
+Dataset preparation and expected directory layouts are documented in
+[`docs/DATASET_SWITCHING.md`](docs/DATASET_SWITCHING.md) and
+[`docs/ZIND.md`](docs/ZIND.md).
 
 ## Configurations
 
@@ -80,6 +84,18 @@ Stage-1 sampling caches map-attention projections across denoising steps.
 Evaluation refines the KDE-selected pose by default. Pass `--top_k 8` only for
 the candidate-quality reranking ablation.
 
+### Evaluation protocol
+
+Training scripts reject `datasets.val_split: test`. Checkpoints and
+hyperparameters must be selected on the validation split, while paper results
+must be produced with the explicit `--split test` argument. During inference,
+the Stage-1 pose is selected solely from the sampled-pose KDE density and the
+optional top-K refiner uses only its learned candidate score. Ground-truth
+poses are read after prediction for metric computation only. The
+`val_best_of_*` values logged during Stage-1 training are oracle diagnostics;
+they are not used to form the reported final pose or select the release
+checkpoint.
+
 ## Checkpoints
 
 Checkpoint binaries are not stored in Git. Expected filenames and SHA-256
@@ -99,8 +115,11 @@ python scripts/check_release_checkpoints.py
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
+python -m ruff check .
 ```
 
 ## License
 
-This project is released under the MIT License.
+This project is released under the MIT License. Vendored Depth Anything V2 and
+DINOv2 components retain their Apache-2.0 terms; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

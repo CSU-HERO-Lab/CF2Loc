@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 from typing import Tuple
 
@@ -35,9 +36,7 @@ class DisCo_Dataset(Dataset):
             "rgb",
         )
         self.map_pose_rot_aug = self.dataset_cfg.get("map_pose_rot_aug", {})
-        self.map_pose_rot_aug_enable = bool(
-            self.map_pose_rot_aug.get("enable", False)
-        )
+        self.map_pose_rot_aug_enable = bool(self.map_pose_rot_aug.get("enable", False))
         self.map_pose_rot_aug_p = float(self.map_pose_rot_aug.get("p", 0.0))
         self.map_pose_rot_aug_angles = self._parse_rotation_angles(
             self.map_pose_rot_aug.get("angles", [0, 90, 180, 270])
@@ -46,8 +45,50 @@ class DisCo_Dataset(Dataset):
         with open(self.data_splits_path, "r", encoding="utf-8") as f:
             data_splits = yaml.safe_load(f)
 
+        self._validate_splits(data_splits)
         self.data_split = ["".join(x.split()) for x in data_splits[self.split]]
         self.data = self._load_data(self.data_folder, self.data_split)
+        if not self.data:
+            raise RuntimeError(
+                f"No samples were loaded for split '{self.split}' from "
+                f"'{self.data_folder}'."
+            )
+
+    def _validate_splits(self, data_splits):
+        if not isinstance(data_splits, dict):
+            raise ValueError(
+                f"Split file '{self.data_splits_path}' must contain a mapping."
+            )
+        if self.split not in data_splits:
+            raise KeyError(
+                f"Split '{self.split}' is not defined in '{self.data_splits_path}'."
+            )
+
+        normalized_splits = {}
+        for split_name, scenes in data_splits.items():
+            if not isinstance(scenes, list):
+                raise ValueError(
+                    f"Split '{split_name}' in '{self.data_splits_path}' "
+                    "must be a list of scene names."
+                )
+            normalized = ["".join(str(scene).split()) for scene in scenes]
+            if len(normalized) != len(set(normalized)):
+                raise ValueError(
+                    f"Split '{split_name}' in '{self.data_splits_path}' "
+                    "contains duplicate scenes."
+                )
+            normalized_splits[split_name] = set(normalized)
+
+        split_names = list(normalized_splits)
+        for i, first_name in enumerate(split_names):
+            for second_name in split_names[i + 1 :]:
+                overlap = normalized_splits[first_name] & normalized_splits[second_name]
+                if overlap:
+                    examples = ", ".join(sorted(overlap)[:5])
+                    raise ValueError(
+                        f"Scene leakage between splits '{first_name}' and "
+                        f"'{second_name}' in '{self.data_splits_path}': {examples}"
+                    )
 
     @staticmethod
     def _parse_rotation_angles(angles):
@@ -248,22 +289,41 @@ class DisCo_Dataset(Dataset):
 
     def _load_data(self, data_folder, data_split):
         data = []
+        missing_scenes = []
         map_data_folder = self.dataset_cfg.get("map_data_folder")
         for scene in data_split:
             cur_dir = os.path.join(data_folder, scene)
-            if not os.path.exists(cur_dir):
+            if not os.path.isdir(cur_dir):
+                missing_scenes.append(scene)
                 continue
 
             scene_format = self._scene_format(cur_dir)
             map_dir = (
-                os.path.join(map_data_folder, scene)
-                if map_data_folder
-                else cur_dir
+                os.path.join(map_data_folder, scene) if map_data_folder else cur_dir
             )
             map_path = os.path.join(map_dir, scene_format["map_file"])
             pose_path = os.path.join(cur_dir, scene_format["pose_file"])
-            depth_path = os.path.join(cur_dir, self.dataset_cfg.get("depth_file", "depth40.txt"))
+            depth_path = os.path.join(
+                cur_dir,
+                self.dataset_cfg.get("depth_file", "depth40.txt"),
+            )
             rgb_dir = os.path.join(cur_dir, scene_format["rgb_dir"])
+            required_paths = {
+                "floorplan": map_path,
+                "pose file": pose_path,
+                "depth file": depth_path,
+                "RGB directory": rgb_dir,
+            }
+            for path_type, path in required_paths.items():
+                exists = (
+                    os.path.isdir(path)
+                    if path_type.endswith("directory")
+                    else os.path.isfile(path)
+                )
+                if not exists:
+                    raise FileNotFoundError(
+                        f"Scene '{scene}' is missing its {path_type}: '{path}'."
+                    )
 
             pose_data = [
                 list(map(float, line.split()))[:3]
@@ -271,16 +331,12 @@ class DisCo_Dataset(Dataset):
                 if line.strip()
             ]
             if scene_format["pose_in_meters"]:
-                try:
-                    pose_data = self._convert_meter_poses_to_pixels(
-                        pose_data,
-                        map_path,
-                        scene_format["map_res"],
-                        scene_format["pose_meter_origin"],
-                    )
-                except Exception as e:
-                    print(f"Skipping scene {scene}: failed to read map {map_path}: {e}")
-                    continue
+                pose_data = self._convert_meter_poses_to_pixels(
+                    pose_data,
+                    map_path,
+                    scene_format["map_res"],
+                    scene_format["pose_meter_origin"],
+                )
             pose_data = self._convert_pose_theta(
                 pose_data,
                 scene_format["pose_theta_sign"],
@@ -302,8 +358,22 @@ class DisCo_Dataset(Dataset):
                 key=self._sort_key,
             )
 
-            sample_count = min(len(files), len(pose_data), len(ray_data))
-            for n in range(sample_count):
+            counts = {
+                "RGB images": len(files),
+                "poses": len(pose_data),
+                "depth rows": len(ray_data),
+            }
+            if len(set(counts.values())) != 1:
+                count_summary = ", ".join(
+                    f"{name}={count}" for name, count in counts.items()
+                )
+                raise ValueError(
+                    f"Scene '{scene}' has mismatched sample counts: {count_summary}."
+                )
+            if not files:
+                raise ValueError(f"Scene '{scene}' contains no samples.")
+
+            for n in range(len(files)):
                 data.append(
                     {
                         "rgb_image": str(files[n]),
@@ -312,6 +382,15 @@ class DisCo_Dataset(Dataset):
                         "ray": ray_data[n],
                     }
                 )
+        if missing_scenes:
+            examples = ", ".join(missing_scenes[:5])
+            suffix = "" if len(missing_scenes) <= 5 else ", ..."
+            warnings.warn(
+                f"Split '{self.split}' lists {len(missing_scenes)} scene "
+                f"directories that are unavailable under '{data_folder}'. "
+                f"They were excluded: {examples}{suffix}",
+                RuntimeWarning,
+            )
         return data
 
     @staticmethod
@@ -337,40 +416,33 @@ class DisCo_Dataset(Dataset):
         return labels
 
     def _load_floorplan(self, floorplan_path, rotation_k=0):
-        try:
-            with Image.open(floorplan_path) as img:
-                if self.floorplan_representation == "semantic_onehot":
-                    img = img.convert("RGB")
-                    rgb = np.asarray(img, dtype=np.uint8)
-                    rgb = self._rotate_array_90(rgb, rotation_k)
-                    labels = self._build_semantic_onehot_labels(rgb)
-                    label_img = Image.fromarray(labels, mode="L")
-                    label_img = label_img.resize(
-                        self.floorplan_img_size,
-                        resample=Image.Resampling.NEAREST,
-                    )
-                    labels = np.asarray(label_img, dtype=np.int64)
-                    onehot = np.eye(5, dtype=np.float32)[labels]
-                    return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
-
+        with Image.open(floorplan_path) as img:
+            if self.floorplan_representation == "semantic_onehot":
                 img = img.convert("RGB")
                 rgb = np.asarray(img, dtype=np.uint8)
                 rgb = self._rotate_array_90(rgb, rotation_k)
-                img = Image.fromarray(rgb, mode="RGB")
-                img = img.resize(self.floorplan_img_size)
-                return transforms.ToTensor()(img)
-        except Exception as e:
-            print(f"Failed to load floorplan {floorplan_path}: {e}")
-            if self.floorplan_representation == "semantic_onehot":
-                return torch.zeros((5, *self.floorplan_img_size))
-            return torch.zeros((3, *self.floorplan_img_size))
+                labels = self._build_semantic_onehot_labels(rgb)
+                label_img = Image.fromarray(labels, mode="L")
+                label_img = label_img.resize(
+                    self.floorplan_img_size,
+                    resample=Image.Resampling.NEAREST,
+                )
+                labels = np.asarray(label_img, dtype=np.int64)
+                onehot = np.eye(5, dtype=np.float32)[labels]
+                return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
+
+            img = img.convert("RGB")
+            rgb = np.asarray(img, dtype=np.uint8)
+            rgb = self._rotate_array_90(rgb, rotation_k)
+            img = Image.fromarray(rgb, mode="RGB")
+            img = img.resize(self.floorplan_img_size)
+            return transforms.ToTensor()(img)
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
         data = self.data[i]
-        rgb_image = Image.open(data["rgb_image"])
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -379,12 +451,14 @@ class DisCo_Dataset(Dataset):
                 ),
             ]
         )
-        rgb_image = transform(rgb_image)
+        with Image.open(data["rgb_image"]) as image:
+            rgb_image = transform(image.convert("RGB"))
 
         pose = torch.tensor(data["pose"])
         ray = torch.tensor(data["ray"])
 
-        w, h = Image.open(data["floorplan_image"]).size
+        with Image.open(data["floorplan_image"]) as image:
+            w, h = image.size
         rotation_k = self._sample_map_pose_rotation()
         if rotation_k != 0:
             pose_np, w, h = self._rotate_pose_wh_90(
@@ -399,34 +473,35 @@ class DisCo_Dataset(Dataset):
 
         raw_map = cv2.imread(data["floorplan_image"], 0)
         if raw_map is None:
-            local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
-            neg_local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
+            raise RuntimeError(
+                f"OpenCV failed to decode floorplan '{data['floorplan_image']}'."
+            )
+
+        raw_map = self._rotate_array_90(raw_map, rotation_k)
+        pose_aug = pose.numpy().copy()
+        if self.split == "train" and self.pose_aug_params.get("enable", False):
+            trans_range = self.pose_aug_params.get("trans_range", 25)
+            rot_range = self.pose_aug_params.get("rot_range", 0.26)
+            pose_aug[0] += np.random.uniform(-trans_range, trans_range)
+            pose_aug[1] += np.random.uniform(-trans_range, trans_range)
+            pose_aug[2] += np.random.uniform(-rot_range, rot_range)
+
+        crop_size_meters = self.dataset_cfg.get("local_map_crop_size_meters", 5.0)
+        local_map_np = self.crop_local_map(raw_map, pose_aug, crop_size_meters)
+        local_map = torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
+
+        if self.hard_negative_mode == "none":
             neg_pose = torch.zeros(3, dtype=torch.float32)
-            print(f"Warning: Failed to load floorplan image {data['floorplan_image']}.")
+            neg_local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
         else:
-            raw_map = self._rotate_array_90(raw_map, rotation_k)
-            pose_aug = pose.numpy().copy()
-            if self.split == "train" and self.pose_aug_params.get("enable", False):
-                trans_range = self.pose_aug_params.get("trans_range", 25)
-                rot_range = self.pose_aug_params.get("rot_range", 0.26)
-                pose_aug[0] += np.random.uniform(-trans_range, trans_range)
-                pose_aug[1] += np.random.uniform(-trans_range, trans_range)
-                pose_aug[2] += np.random.uniform(-rot_range, rot_range)
-
-            crop_size_meters = self.dataset_cfg.get("local_map_crop_size_meters", 5.0)
-            local_map_np = self.crop_local_map(raw_map, pose_aug, crop_size_meters)
-            local_map = torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
-
-            if self.hard_negative_mode == "none":
-                neg_pose = torch.zeros(3, dtype=torch.float32)
-                neg_local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
-            else:
-                neg_pose_list = self.get_hard_negative_pose(pose.numpy())
-                neg_pose = torch.tensor(neg_pose_list, dtype=torch.float32)
-                neg_local_map_np = self.crop_local_map(
-                    raw_map, neg_pose.numpy(), crop_size_meters
-                )
-                neg_local_map = torch.from_numpy(neg_local_map_np).float().unsqueeze(0) / 255.0
+            neg_pose_list = self.get_hard_negative_pose(pose.numpy())
+            neg_pose = torch.tensor(neg_pose_list, dtype=torch.float32)
+            neg_local_map_np = self.crop_local_map(
+                raw_map, neg_pose.numpy(), crop_size_meters
+            )
+            neg_local_map = (
+                torch.from_numpy(neg_local_map_np).float().unsqueeze(0) / 255.0
+            )
 
         return (
             torch.as_tensor(rgb_image, dtype=torch.float32),
@@ -486,15 +561,3 @@ class DisCo_Dataset(Dataset):
             )
 
         return local_map
-
-
-if __name__ == "__main__":
-    dataset = DisCo_Dataset(
-        data_folder="datasets_s3d/Structured3D",
-        data_splits_path="datasets_s3d/Structured3D/split.yaml",
-        split="train",
-        floorplan_img_size=(256, 256),
-        pose_aug_params={"enable": True, "trans_range": 25, "rot_range": 0.26},
-        dataset_cfg={"dataset_type": "s3d", "map_res": 0.02},
-    )
-    print(len(dataset))

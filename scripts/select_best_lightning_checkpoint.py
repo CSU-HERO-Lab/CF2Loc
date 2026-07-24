@@ -13,7 +13,11 @@ def parse_args():
 
 
 def checkpoint_score(path: Path, monitor: str):
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False,
+    )
     for state in checkpoint.get("callbacks", {}).values():
         if not isinstance(state, dict) or state.get("monitor") != monitor:
             continue

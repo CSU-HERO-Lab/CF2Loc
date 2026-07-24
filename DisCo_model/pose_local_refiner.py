@@ -222,7 +222,8 @@ class PoseRefinerDataset(Dataset):
     def _rng(self, index: int):
         if self.deterministic:
             return np.random.default_rng(self.seed + index)
-        return np.random.default_rng()
+        # Lightning seeds NumPy independently in every data-loader worker.
+        return np.random
 
     def _sample_rotation(self, rng) -> int:
         if self.split != "train" or not self.base_dataset.map_pose_rot_aug_enable:
@@ -335,7 +336,11 @@ class PoseLocalRefiner(nn.Module):
         )
 
         diffusion = PoseQueryDiffusionLocalizer(config)
-        checkpoint = torch.load(config["baseline_checkpoint_path"], map_location="cpu")
+        checkpoint = torch.load(
+            config["baseline_checkpoint_path"],
+            map_location="cpu",
+            weights_only=False,
+        )
         state_dict = checkpoint.get("state_dict", checkpoint)
         image_state_dict = {
             key: value
@@ -725,6 +730,10 @@ class PoseLocalRefinerLightning(pl.LightningModule):
             + self.score_weight * score_loss
             + self.dense_heatmap_weight * dense_heatmap_loss
         )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite {stage} refiner loss: {loss.detach().item()}"
+            )
 
         refined_pose = apply_local_delta_to_pose(
             batch["candidate_pose"],

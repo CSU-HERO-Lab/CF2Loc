@@ -13,8 +13,8 @@ precision: "32-true"
 gradient_clip_val: 1.0
 num_sanity_val_steps: 1
 
-# Match the reported gray-only, no-clean S3D stage-1 baseline.
-baseline_checkpoint_path: "logs/pose_diffusion_runs/pose_query_diffusion_s3d_gray_no_clean/checkpoints/epoch=29-val_1m_recall=0.713-val_best_of_64_1m_recall=0.938_20260716_184025.ckpt"
+# Match the reported grayscale S3D Stage-1 baseline.
+baseline_checkpoint_path: "checkpoints/release_s3d/s3d_no_sem_stage1_best.ckpt"
 
 # Frozen first-stage observation encoder.
 dptv2_ckpt_path: "checkpoints/depth_anything_v2_vits.pth"

@@ -51,6 +51,11 @@ def main(config, ckpt_path=None):
         dataset_cfg=dataset_cfg,
     )
     val_split = dataset_cfg.get("val_split", "val")
+    if val_split == "test":
+        raise ValueError(
+            "Training may not use the test split for model selection. "
+            "Set datasets.val_split to 'val'."
+        )
     val_dataset = DisCo_Dataset(
         data_folder=dataset_cfg["data_folder"],
         data_splits_path=dataset_cfg["data_splits"],
@@ -92,9 +97,7 @@ def main(config, ckpt_path=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint = ModelCheckpoint(
         dirpath=os.path.join(run_dir, "checkpoints"),
-        filename="{epoch:02d}-{val_1m_recall:.3f}-"
-        "{val_best_of_64_1m_recall:.3f}_"
-        + timestamp,
+        filename="{epoch:02d}-{val_1m_recall:.3f}_" + timestamp,
         save_top_k=3,
         save_last=True,
         monitor="val_1m_recall",

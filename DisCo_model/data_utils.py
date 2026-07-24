@@ -181,8 +181,6 @@ def img_path_to_data_and_point_transfer(path: Union[str, io.BytesIO], ori_size: 
         cur_pos = cur_pos * 100 + np.array([w0 / 2, h0 / 2])
         goal_pos = goal_pos * 100 + np.array([w0 / 2, h0 / 2])
         cur_ori = cur_ori * 100 + np.array([w0 / 2, h0 / 2])      
-        aspect_ratio = IMAGE_ASPECT_RATIO
-                  
         img = img.resize(image_resize_size)
         cur_pos_in_resizeSize = cur_pos * image_resize_size[0] / w0
         goal_pos_in_resizeSize = goal_pos * image_resize_size[0] / w0

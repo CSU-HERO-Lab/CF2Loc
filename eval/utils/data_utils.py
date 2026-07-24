@@ -9,10 +9,10 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from utils.utils import gravity_align
-from torchvision.transforms import Normalize
 import torch
-from torch.nn import functional as F
-from torchvision import transforms  # 确保头部引入了 transforms
+from torchvision import transforms
+
+
 class TrajDataset(Dataset):
     def __init__(
         self,
@@ -435,9 +435,11 @@ class GridSeqDataset(Dataset):
                 src_img[l, :, :, :][src_mask[l, :, :] == 0, :] = 0
         else:
 
-            if self.net_type == 'rrp':
-                # 1. 定义 Normalizer
-                normalizer = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            if self.net_type == "rrp":
+                normalizer = transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                )
                 ref_img_rgb = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
                 ref_tensor = torch.from_numpy(ref_img_rgb).permute(2, 0, 1) / 255.0
                 ref_img_norm_tensor = normalizer(ref_tensor)
@@ -453,7 +455,7 @@ class GridSeqDataset(Dataset):
                 src_img = np.stack(src_img_list_norm, axis=0).astype(np.float32)
         
             else:
-                # 默认的 ImageNet 归一化 (不缩放)
+                # Standard ImageNet normalization.
                 ref_img = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB) / 255.0
                 ref_img -= (0.485, 0.456, 0.406)
                 ref_img /= (0.229, 0.224, 0.225)
@@ -465,10 +467,10 @@ class GridSeqDataset(Dataset):
                     src_img[l, :, :, :] -= (0.485, 0.456, 0.406)
                     src_img[l, :, :, :] /= (0.229, 0.224, 0.225)
 
-        # from H,W,C to C,H,W (这部分保持不变)
+        # Convert HWC arrays to channel-first tensors.
         ref_img = np.transpose(ref_img, (2, 0, 1)).astype(np.float32)
         src_img = np.transpose(src_img, (0, 3, 1, 2)).astype(np.float32)
         data_dict["ref_img"] = ref_img
         data_dict["src_img"] = src_img
-        data_dict["obs_tensor"] = ref_img_norm_tensor
+        data_dict["obs_tensor"] = torch.from_numpy(ref_img.copy())
         return data_dict

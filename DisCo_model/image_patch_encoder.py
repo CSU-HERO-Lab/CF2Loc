@@ -30,7 +30,11 @@ class ImagePatchEncoder(nn.Module):
         self.patch_size = 14
         self.use_cls_token = use_cls_token
 
-        params = torch.load(checkpoint_path, map_location="cpu")
+        params = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
         self.backbone = DINOv2(model_name=encoder)
 
         pretrained_dict = OrderedDict()

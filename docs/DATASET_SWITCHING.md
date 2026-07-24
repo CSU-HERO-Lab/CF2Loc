@@ -30,3 +30,16 @@ python training/train_pose_query_diffusion.py \
 Semantic configurations additionally expect SemRayLoc-compatible semantic
 floorplans under `datasets_semrayloc/processed` for Structured3D or
 `datasets_zind/processed` for ZInD.
+
+For the data used by the release checkpoints, the loaded frame counts are:
+
+| Configuration | Train | Validation | Test |
+| --- | ---: | ---: | ---: |
+| Structured3D grayscale | 65,048 | 6,726 | 6,405 |
+| Structured3D semantic | 64,951 | 6,726 | 6,405 |
+| ZInD grayscale or semantic | 192,000 | 22,656 | 22,764 |
+
+The original Structured3D split file lists some unavailable training scene
+directories. The loader reports their count and examples in a runtime warning;
+it does not silently discard missing scenes. Missing files or mismatched
+RGB/pose/depth counts inside an available scene remain fatal errors.
