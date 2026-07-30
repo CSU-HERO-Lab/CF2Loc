@@ -19,6 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DisCo_model.disco_dataset import DisCo_Dataset
 from DisCo_model.pose_likelihood import crop_local_map
+from DisCo_model.pose_local_refiner import (
+    PoseLocalRefinerLightning,
+    apply_local_delta_to_pose,
+    crop_to_refiner_tensor,
+)
 from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
 from training.DisCo_lightning_module import DisCoLocModel
 
@@ -38,6 +43,8 @@ def parse_args():
     parser.add_argument("--diffusion-ckpt", required=True)
     parser.add_argument("--disco-ckpt", required=True)
     parser.add_argument("--depth-ckpt", required=True)
+    parser.add_argument("--refiner-config")
+    parser.add_argument("--refiner-ckpt")
     parser.add_argument("--data-root")
     parser.add_argument("--split-yaml")
     parser.add_argument("--split", choices=("val", "test"), required=True)
@@ -76,6 +83,17 @@ def parse_args():
         parser.error("--subset-fraction must lie in (0, 1]")
     if args.max_samples is not None and args.max_samples < 1:
         parser.error("--max-samples must be positive")
+    if bool(args.refiner_config) != bool(args.refiner_ckpt):
+        parser.error("--refiner-config and --refiner-ckpt must be used together")
+    parameter_count = (
+        len(args.mode_counts)
+        * len(args.nms_xy_m)
+        * len(args.nms_theta_deg)
+        * len(args.crop_sizes_m)
+        * len(args.disco_weights)
+    )
+    if args.refiner_ckpt and parameter_count != 1:
+        parser.error("Refiner evaluation requires exactly one reranking parameter set")
     return args
 
 
@@ -343,6 +361,60 @@ def build_candidate_maps(floorplan, poses, crop_size_m, map_res):
     return torch.stack(maps)
 
 
+def build_refiner_maps(floorplans, poses, config):
+    dataset_cfg = config["datasets"]
+    representation = dataset_cfg.get(
+        "refiner_floorplan_representation",
+        dataset_cfg.get("floorplan_representation", "gray"),
+    )
+    maps = []
+    for floorplan, pose in zip(floorplans, poses.detach().cpu().numpy()):
+        maps.append(
+            crop_to_refiner_tensor(
+                floorplan,
+                pose,
+                crop_size_meters=float(
+                    config.get("refiner_crop_size_meters", 5.0)
+                ),
+                map_res=float(dataset_cfg.get("map_res", 0.02)),
+                output_size=int(config.get("refiner_crop_output_size", 256)),
+                representation=representation,
+                oriented=bool(dataset_cfg.get("refiner_oriented_crop", True)),
+            ).float()
+        )
+    return torch.stack(maps)
+
+
+def assert_refiner_image_compatibility(diffusion, refiner):
+    module_pairs = (
+        (
+            diffusion.condition_encoder.image_encoder,
+            refiner.refiner.image_encoder,
+            "image_encoder",
+        ),
+        (
+            diffusion.condition_encoder.image_norm,
+            refiner.refiner.image_norm,
+            "image_norm",
+        ),
+        (
+            diffusion.condition_encoder.image_mixer,
+            refiner.refiner.image_mixer,
+            "image_mixer",
+        ),
+    )
+    for diffusion_module, refiner_module, name in module_pairs:
+        diffusion_state = diffusion_module.state_dict()
+        refiner_state = refiner_module.state_dict()
+        if diffusion_state.keys() != refiner_state.keys():
+            raise ValueError(f"Refiner {name} structure differs from Stage-1.")
+        for key in diffusion_state:
+            if not torch.equal(diffusion_state[key].cpu(), refiner_state[key].cpu()):
+                raise ValueError(
+                    f"Refiner {name}.{key} differs from the Stage-1 checkpoint."
+                )
+
+
 def make_subset_indices(total, subset_fraction, max_samples, seed):
     if subset_fraction is not None:
         count = max(1, int(round(total * subset_fraction)))
@@ -441,6 +513,22 @@ def main():
     ).to(device)
     disco.eval()
 
+    refiner = None
+    refiner_config = None
+    if args.refiner_ckpt:
+        with open(args.refiner_config, "r", encoding="utf-8") as config_file:
+            refiner_config = yaml.safe_load(config_file)
+        refiner_config["baseline_checkpoint_path"] = args.diffusion_ckpt
+        refiner_config["dptv2_ckpt_path"] = args.depth_ckpt
+        refiner_config["datasets"]["map_res"] = dataset_cfg.get("map_res", 0.02)
+        refiner = PoseLocalRefinerLightning.load_from_checkpoint(
+            args.refiner_ckpt,
+            config=refiner_config,
+            map_location="cpu",
+        ).to(device)
+        refiner.eval()
+        assert_refiner_image_compatibility(diffusion, refiner)
+
     num_particles = args.num_particles or int(
         config.get("diffusion_val_particles", 64)
     )
@@ -468,6 +556,7 @@ def main():
                         parameter_metrics[key] = Metrics()
 
     baseline_metrics = Metrics()
+    refined_metrics = Metrics() if refiner is not None else None
     map_cache = FloorplanCache()
     map_res = float(dataset_cfg.get("map_res", 0.02))
     with torch.inference_mode():
@@ -648,6 +737,38 @@ def main():
                                     target,
                                     map_res,
                                 )
+                                if refiner is not None:
+                                    record["selected_pose"] = selected_pose
+
+            if refiner is not None:
+                selected_poses = torch.stack(
+                    [record["selected_pose"] for record in sample_records]
+                )
+                local_maps = build_refiner_maps(
+                    [record["floorplan"] for record in sample_records],
+                    selected_poses,
+                    refiner_config,
+                ).to(device, non_blocking=True)
+                outputs = refiner(
+                    obs_img=None,
+                    local_map=local_maps,
+                    candidate_pose=selected_poses,
+                    wh=wh,
+                    image_tokens=diffusion_image_tokens,
+                )
+                refined_poses = apply_local_delta_to_pose(
+                    selected_poses,
+                    outputs["delta_xy_m"],
+                    outputs["delta_theta"],
+                    map_res=map_res,
+                    wh=wh,
+                )
+                for record, refined_pose in zip(sample_records, refined_poses):
+                    refined_metrics.update(
+                        refined_pose,
+                        record["target"],
+                        map_res,
+                    )
 
     records = []
     for nms_xy_m in args.nms_xy_m:
@@ -702,12 +823,18 @@ def main():
         "best": records[0],
         "results": records,
     }
+    if refined_metrics is not None:
+        result["refiner_checkpoint"] = os.path.abspath(args.refiner_ckpt)
+        result["refined"] = refined_metrics.summarize()
     output_path = os.path.abspath(args.output_json)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as output_file:
         json.dump(result, output_file, indent=2)
         output_file.write("\n")
-    print(json.dumps({"baseline": result["baseline"], "best": result["best"]}, indent=2))
+    summary = {"baseline": result["baseline"], "best": result["best"]}
+    if refined_metrics is not None:
+        summary["refined"] = result["refined"]
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
