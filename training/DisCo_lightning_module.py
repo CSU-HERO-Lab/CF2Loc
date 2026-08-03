@@ -53,7 +53,25 @@ class DisCoLocModel(pl.LightningModule):
         if self.use_image_cls_token:
             self.cls_token_norm = nn.LayerNorm(self.feature_dim)
 
-        self.map_encoder = MapEncoder(input_channels=1, feature_dim=self.feature_dim)
+        local_map_representation = config.get("datasets", {}).get(
+            "local_map_representation",
+            "semantic_onehot"
+            if config.get("datasets", {}).get("floorplan_representation")
+            == "semantic_onehot"
+            else "gray",
+        )
+        input_channels = {"gray": 1, "semantic_onehot": 5}.get(
+            local_map_representation
+        )
+        if input_channels is None:
+            raise ValueError(
+                "DisCo local_map_representation must be 'gray' or "
+                "'semantic_onehot'."
+            )
+        self.map_encoder = MapEncoder(
+            input_channels=input_channels,
+            feature_dim=self.feature_dim,
+        )
         self.map_pos_mlp = nn.Sequential(
             nn.Linear(2, self.feature_dim),
             nn.GELU(),

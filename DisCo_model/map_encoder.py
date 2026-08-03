@@ -24,9 +24,11 @@ class MapEncoder(nn.Module):
             )
             if use_pretrained:
                 with torch.no_grad():
-                    self.backbone.conv1.weight.data = original_conv1.weight.data.mean(
-                        dim=1,
-                        keepdim=True,
+                    channel_mean = original_conv1.weight.data.mean(
+                        dim=1, keepdim=True
+                    )
+                    self.backbone.conv1.weight.copy_(
+                        channel_mean.expand(-1, input_channels, -1, -1)
                     )
 
         # Preserve the spatial feature map and project it to the model dimension.

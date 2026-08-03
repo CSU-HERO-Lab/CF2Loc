@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DisCo_model.disco_dataset import DisCo_Dataset
-from DisCo_model.pose_query_diffusion import PoseQueryDiffusionLocalizer
+from training.DisCo_lightning_module import DisCoLocModel
 from training.checkpoint_utils import update_best_checkpoint_link
 
 
@@ -41,22 +41,21 @@ def main(config, ckpt_path=None):
     pl.seed_everything(int(config.get("seed", 42)), workers=True)
     dataset_cfg = config["datasets"]
     floorplan_size = tuple(dataset_cfg["floorplan_img_size"])
-    num_workers = int(config.get("num_workers", 4))
-
-    train_dataset = DisCo_Dataset(
-        data_folder=dataset_cfg["data_folder"],
-        data_splits_path=dataset_cfg["data_splits"],
-        split="train",
-        floorplan_img_size=floorplan_size,
-        pose_aug_params=dataset_cfg.get("pose_aug", {"enable": False}),
-        dataset_cfg=dataset_cfg,
-    )
     val_split = dataset_cfg.get("val_split", "val")
     if val_split == "test":
         raise ValueError(
             "Training may not use the test split for model selection. "
             "Set datasets.val_split to 'val'."
         )
+
+    train_dataset = DisCo_Dataset(
+        data_folder=dataset_cfg["data_folder"],
+        data_splits_path=dataset_cfg["data_splits"],
+        split="train",
+        floorplan_img_size=floorplan_size,
+        pose_aug_params=dataset_cfg.get("pose_aug", {"enable": True}),
+        dataset_cfg=dataset_cfg,
+    )
     val_dataset = DisCo_Dataset(
         data_folder=dataset_cfg["data_folder"],
         data_splits_path=dataset_cfg["data_splits"],
@@ -67,6 +66,7 @@ def main(config, ckpt_path=None):
     )
     val_dataset = build_validation_subset(val_dataset, dataset_cfg)
 
+    num_workers = int(config.get("num_workers", 4))
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(config["batch_size"]),
@@ -81,17 +81,16 @@ def main(config, ckpt_path=None):
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=False,
+        drop_last=True,
     )
 
-    model = PoseQueryDiffusionLocalizer(config)
-    run_dir = os.path.join("logs", "pose_diffusion_runs", config["run_name"])
+    model = DisCoLocModel(config)
+    run_dir = os.path.join("logs", "disco_runs", config["run_name"])
     os.makedirs(run_dir, exist_ok=True)
-
     logger = True
     if config.get("use_wandb", False):
         logger = WandbLogger(
-            project=config.get("project_name", "disco_model"),
+            project=config.get("project_name", "cf2loc"),
             name=config["run_name"],
         )
 
@@ -99,10 +98,10 @@ def main(config, ckpt_path=None):
     checkpoint_dir = config.get("checkpoint_dir", os.path.join(run_dir, "checkpoints"))
     checkpoint = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename="{epoch:02d}-{val_1m_recall:.3f}_" + timestamp,
+        filename="{epoch:02d}-{val_acc:.3f}_" + timestamp,
         save_top_k=3,
         save_last=True,
-        monitor="val_1m_recall",
+        monitor="val_acc",
         mode="max",
     )
     trainer = pl.Trainer(
@@ -125,7 +124,7 @@ def main(config, ckpt_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/PoseQueryDiffusion_S3D.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--run_name")

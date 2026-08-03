@@ -35,6 +35,16 @@ class DisCo_Dataset(Dataset):
             "floorplan_representation",
             "rgb",
         )
+        self.local_map_representation = self.dataset_cfg.get(
+            "local_map_representation",
+            "semantic_onehot"
+            if self.floorplan_representation == "semantic_onehot"
+            else "gray",
+        )
+        if self.local_map_representation not in ("gray", "semantic_onehot"):
+            raise ValueError(
+                "local_map_representation must be 'gray' or 'semantic_onehot'."
+            )
         self.map_pose_rot_aug = self.dataset_cfg.get("map_pose_rot_aug", {})
         self.map_pose_rot_aug_enable = bool(self.map_pose_rot_aug.get("enable", False))
         self.map_pose_rot_aug_p = float(self.map_pose_rot_aug.get("p", 0.0))
@@ -471,13 +481,18 @@ class DisCo_Dataset(Dataset):
         wh_tensor = torch.tensor([w, h], dtype=torch.float32)
         floorplan_img = self._load_floorplan(data["floorplan_image"], rotation_k)
 
-        raw_map = cv2.imread(data["floorplan_image"], 0)
-        if raw_map is None:
-            raise RuntimeError(
-                f"OpenCV failed to decode floorplan '{data['floorplan_image']}'."
-            )
-
-        raw_map = self._rotate_array_90(raw_map, rotation_k)
+        if self.local_map_representation == "semantic_onehot":
+            with Image.open(data["floorplan_image"]) as image:
+                raw_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            raw_rgb = self._rotate_array_90(raw_rgb, rotation_k)
+            raw_map = self._build_semantic_onehot_labels(raw_rgb)
+        else:
+            raw_map = cv2.imread(data["floorplan_image"], cv2.IMREAD_GRAYSCALE)
+            if raw_map is None:
+                raise RuntimeError(
+                    f"OpenCV failed to decode floorplan '{data['floorplan_image']}'."
+                )
+            raw_map = self._rotate_array_90(raw_map, rotation_k)
         pose_aug = pose.numpy().copy()
         if self.split == "train" and self.pose_aug_params.get("enable", False):
             trans_range = self.pose_aug_params.get("trans_range", 25)
@@ -487,20 +502,18 @@ class DisCo_Dataset(Dataset):
             pose_aug[2] += np.random.uniform(-rot_range, rot_range)
 
         crop_size_meters = self.dataset_cfg.get("local_map_crop_size_meters", 5.0)
-        local_map_np = self.crop_local_map(raw_map, pose_aug, crop_size_meters)
-        local_map = torch.from_numpy(local_map_np).float().unsqueeze(0) / 255.0
+        local_map = self.crop_local_map_tensor(raw_map, pose_aug, crop_size_meters)
 
         if self.hard_negative_mode == "none":
             neg_pose = torch.zeros(3, dtype=torch.float32)
-            neg_local_map = torch.zeros((1, 128, 128), dtype=torch.float32)
+            neg_local_map = torch.zeros_like(local_map)
         else:
             neg_pose_list = self.get_hard_negative_pose(pose.numpy())
             neg_pose = torch.tensor(neg_pose_list, dtype=torch.float32)
-            neg_local_map_np = self.crop_local_map(
-                raw_map, neg_pose.numpy(), crop_size_meters
-            )
-            neg_local_map = (
-                torch.from_numpy(neg_local_map_np).float().unsqueeze(0) / 255.0
+            neg_local_map = self.crop_local_map_tensor(
+                raw_map,
+                neg_pose.numpy(),
+                crop_size_meters,
             )
 
         return (
@@ -530,14 +543,29 @@ class DisCo_Dataset(Dataset):
         theta_new = theta + np.random.uniform(-0.2, 0.2)
         return [x_new, y_new, theta_new]
 
-    def crop_local_map(self, map_img, pose, crop_size_meters, output_size=128):
+    def crop_local_map(
+        self,
+        map_img,
+        pose,
+        crop_size_meters,
+        output_size=128,
+        interpolation=cv2.INTER_LINEAR,
+        resize_interpolation=cv2.INTER_AREA,
+        border_value=255,
+    ):
         x, y, theta = pose
         crop_size_px = int(crop_size_meters / self.map_res)
 
         h, w = map_img.shape
         pad = crop_size_px
         map_padded = cv2.copyMakeBorder(
-            map_img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255
+            map_img,
+            pad,
+            pad,
+            pad,
+            pad,
+            cv2.BORDER_CONSTANT,
+            value=border_value,
         )
 
         center = (x + pad, y + pad)
@@ -550,14 +578,45 @@ class DisCo_Dataset(Dataset):
             map_padded,
             rot_matrix,
             (crop_size_px, crop_size_px),
-            flags=cv2.INTER_LINEAR,
+            flags=interpolation,
             borderMode=cv2.BORDER_CONSTANT,
-            borderValue=255,
+            borderValue=border_value,
         )
 
         if crop_size_px != output_size:
             local_map = cv2.resize(
-                local_map, (output_size, output_size), interpolation=cv2.INTER_AREA
+                local_map,
+                (output_size, output_size),
+                interpolation=resize_interpolation,
             )
 
         return local_map
+
+    def crop_local_map_tensor(
+        self,
+        map_img,
+        pose,
+        crop_size_meters,
+        output_size=128,
+    ):
+        if self.local_map_representation == "semantic_onehot":
+            labels = self.crop_local_map(
+                map_img,
+                pose,
+                crop_size_meters,
+                output_size=output_size,
+                interpolation=cv2.INTER_NEAREST,
+                resize_interpolation=cv2.INTER_NEAREST,
+                border_value=4,
+            ).astype(np.int64)
+            labels = np.clip(labels, 0, 4)
+            onehot = np.eye(5, dtype=np.float32)[labels]
+            return torch.from_numpy(onehot).permute(2, 0, 1).contiguous()
+
+        local_map = self.crop_local_map(
+            map_img,
+            pose,
+            crop_size_meters,
+            output_size=output_size,
+        )
+        return torch.from_numpy(local_map).float().unsqueeze(0) / 255.0

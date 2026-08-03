@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DisCo_model.pose_local_refiner import PoseLocalRefinerLightning, PoseRefinerDataset
+from training.checkpoint_utils import update_best_checkpoint_link
 
 
 def build_dataset(config: dict, split: str, deterministic: bool):
@@ -98,8 +99,9 @@ def main(config, ckpt_path=None):
         )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = config.get("checkpoint_dir", os.path.join(run_dir, "checkpoints"))
     checkpoint = ModelCheckpoint(
-        dirpath=os.path.join(run_dir, "checkpoints"),
+        dirpath=checkpoint_dir,
         filename="{epoch:02d}-{val_refined_0.5m_recall:.3f}-"
         "{val_refined_0.1m_recall:.3f}_"
         + timestamp,
@@ -123,6 +125,7 @@ def main(config, ckpt_path=None):
         num_sanity_val_steps=int(config.get("num_sanity_val_steps", 1)),
     )
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+    update_best_checkpoint_link(checkpoint.best_model_path, checkpoint_dir)
 
 
 if __name__ == "__main__":

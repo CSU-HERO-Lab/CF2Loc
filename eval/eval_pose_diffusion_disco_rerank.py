@@ -12,13 +12,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from DisCo_model.disco_dataset import DisCo_Dataset
-from DisCo_model.pose_likelihood import crop_local_map
 from DisCo_model.pose_local_refiner import (
     PoseLocalRefinerLightning,
     apply_local_delta_to_pose,
@@ -123,14 +123,20 @@ class FloorplanCache:
         self.max_items = max_items
         self.cache = OrderedDict()
 
-    def get(self, path):
-        if path in self.cache:
-            self.cache.move_to_end(path)
-            return self.cache[path]
-        floorplan = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if floorplan is None:
-            raise FileNotFoundError(f"Failed to read floorplan: {path}")
-        self.cache[path] = floorplan
+    def get(self, path, representation, dataset):
+        key = (path, representation)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        if representation == "semantic_onehot":
+            with Image.open(path) as image:
+                rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            floorplan = dataset._build_semantic_onehot_labels(rgb)
+        else:
+            floorplan = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if floorplan is None:
+                raise FileNotFoundError(f"Failed to read floorplan: {path}")
+        self.cache[key] = floorplan
         if len(self.cache) > self.max_items:
             self.cache.popitem(last=False)
         return floorplan
@@ -345,19 +351,20 @@ def encode_diffusion_map_context(condition_encoder, floorplan_img, image_tokens)
     return map_tokens, map_coordinates, image_tokens.mean(dim=1)
 
 
-def build_candidate_maps(floorplan, poses, crop_size_m, map_res):
+def build_candidate_maps(floorplan, poses, crop_size_m, map_res, representation):
     maps = []
     for pose in poses.detach().cpu().numpy():
-        local_map = crop_local_map(
-            floorplan,
-            pose[0],
-            pose[1],
-            pose[2],
-            crop_size_meters=crop_size_m,
-            res=map_res,
-            output_size=128,
+        maps.append(
+            crop_to_refiner_tensor(
+                floorplan,
+                pose,
+                crop_size_meters=crop_size_m,
+                map_res=map_res,
+                output_size=128,
+                representation=representation,
+                oriented=True,
+            )
         )
-        maps.append(torch.from_numpy(local_map).float().unsqueeze(0) / 255.0)
     return torch.stack(maps)
 
 
@@ -621,7 +628,12 @@ def main():
                 }
                 union_poses = sample_poses[union_tensor]
                 floorplan_path = dataset.data[dataset_index]["floorplan_image"]
-                floorplan = map_cache.get(floorplan_path)
+                disco_representation = dataset.local_map_representation
+                floorplan = map_cache.get(
+                    floorplan_path,
+                    disco_representation,
+                    dataset,
+                )
                 sample_records.append(
                     {
                         "batch_index": batch_index,
@@ -646,6 +658,7 @@ def main():
                         record["union_poses"],
                         crop_size_m,
                         map_res,
+                        disco_representation,
                     )
                     map_batches.append(candidate_maps)
                     image_batches.append(
