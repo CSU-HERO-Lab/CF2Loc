@@ -77,19 +77,19 @@ run_palms_fold() {
 case "$QUEUE_ID" in
   0)
     run_job disco disco_s3d_semantic_5m_seed42
+    run_job disco disco_zind_semantic_5m_seed42
     run_palms_fold 1
-    run_palms_fold 2
     ;;
   1)
     run_job refiner refiner_s3d_semantic_11m_seed42
+    run_job refiner refiner_zind_no_sem_11m_seed42
+    run_palms_fold 2
     run_palms_fold 3
-    run_palms_fold 4
     ;;
   2)
     run_job disco disco_zind_no_sem_5m_seed42
-    run_job refiner refiner_zind_no_sem_11m_seed42
-    run_job disco disco_zind_semantic_5m_seed42
     run_job refiner refiner_zind_semantic_11m_seed42
+    run_palms_fold 4
     run_palms_fold 5
     ;;
   *)
