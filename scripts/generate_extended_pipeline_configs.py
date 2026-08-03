@@ -37,8 +37,8 @@ def make_disco(source_config, run_name):
     config.update(
         {
             "epochs": 30,
-            "batch_size": 32,
-            "val_batch_size": 32,
+            "batch_size": 64,
+            "val_batch_size": 64,
             "precision": "32-true",
             "feature_dim": 128,
             "num_heads": 4,
