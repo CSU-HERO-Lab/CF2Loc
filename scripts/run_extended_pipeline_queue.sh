@@ -16,6 +16,9 @@ LOG_DIR="logs/extended_pipeline_11m/queue_gpu${GPU_ID}"
 cd "$ROOT"
 mkdir -p "$LOG_DIR" checkpoints/extended_pipeline_11m
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
+if ! grep -q "api.wandb.ai" "$HOME/.netrc" 2>/dev/null; then
+  export WANDB_MODE="${WANDB_MODE:-offline}"
+fi
 
 config_value() {
   "$PYTHON" - "$1" "$2" <<'PY'
