@@ -113,6 +113,7 @@ def main(config, ckpt_path=None):
         default_root_dir=run_dir,
         log_every_n_steps=int(config.get("log_every_n_steps", 10)),
         precision=config.get("precision", "32-true"),
+        accumulate_grad_batches=int(config.get("accumulate_grad_batches", 1)),
         gradient_clip_val=float(config.get("gradient_clip_val", 1.0)),
         limit_train_batches=config.get("limit_train_batches", None),
         limit_val_batches=config.get("limit_val_batches", None),
