@@ -35,7 +35,7 @@ diffusion_pose_fourier_bands: 4
 diffusion_train_steps: 1000
 diffusion_train_particles: 8
 diffusion_val_particles: 64
-diffusion_sample_steps: 20
+diffusion_sample_steps: 10
 diffusion_theta_loss_weight: 1.0
 diffusion_mode_sigma_m: 0.75
 diffusion_mode_sigma_deg: 20.0

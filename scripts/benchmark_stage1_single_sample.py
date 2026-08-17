@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-particles", type=int, default=64)
-    parser.add_argument("--num-steps", type=int, default=20)
+    parser.add_argument("--num-steps", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)

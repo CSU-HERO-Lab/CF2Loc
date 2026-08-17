@@ -178,7 +178,7 @@ def main():
     dataset_cfg = config["datasets"]
     map_res = float(dataset_cfg.get("map_res", 0.02))
     num_particles = int(config.get("diffusion_val_particles", 64))
-    num_steps = int(config.get("diffusion_sample_steps", 20))
+    num_steps = int(config.get("diffusion_sample_steps", 10))
     if args.top_k > num_particles:
         raise ValueError(
             f"--top-k ({args.top_k}) exceeds the configured particle count "

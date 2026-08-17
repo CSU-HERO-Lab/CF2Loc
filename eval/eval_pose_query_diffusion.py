@@ -92,7 +92,7 @@ def main():
     num_steps = int(
         args.num_steps
         if args.num_steps is not None
-        else config.get("diffusion_sample_steps", 20)
+        else config.get("diffusion_sample_steps", 10)
     )
     if num_particles < 1 or num_steps < 1:
         raise ValueError("num_particles and num_steps must be positive")

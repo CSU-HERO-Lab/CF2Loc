@@ -545,7 +545,7 @@ class PoseQueryDiffusionLocalizer(pl.LightningModule):
         self.num_train_steps = int(config.get("diffusion_train_steps", 1000))
         self.train_particles = int(config.get("diffusion_train_particles", 8))
         self.val_particles = int(config.get("diffusion_val_particles", 64))
-        self.sample_steps = int(config.get("diffusion_sample_steps", 20))
+        self.sample_steps = int(config.get("diffusion_sample_steps", 10))
         self.theta_loss_weight = float(config.get("diffusion_theta_loss_weight", 1.0))
         self.mode_sigma_m = float(config.get("diffusion_mode_sigma_m", 0.75))
         self.mode_sigma_deg = float(config.get("diffusion_mode_sigma_deg", 20.0))
