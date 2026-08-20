@@ -83,15 +83,8 @@ See [`checkpoints/README.md`](checkpoints/README.md) for checkpoint paths.
 python scripts/check_release_checkpoints.py
 ```
 
-## Tests
-
-```bash
-pytest -q
-ruff check .
-```
-
 ## License
 
 This project is released under the MIT License. Vendored Depth Anything V2 and
-DINOv2 components retain their Apache-2.0 terms; see
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+DINOv2 components retain their Apache-2.0 terms; the license text is included
+under `LICENSES/`.
